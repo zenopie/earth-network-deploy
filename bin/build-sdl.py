@@ -6,6 +6,8 @@ Textual insertion, not a YAML round-trip, so the committed file's comments and
 exact shape survive into what the provider receives. A round-trip would also
 risk turning version: "2.0" into a float, which the SDL parser rejects.
 """
+import base64
+import json
 import os, re, sys, yaml
 
 repo   = sys.argv[1]           # this repo
@@ -40,6 +42,18 @@ anchor = "      - VALIDATOR_BONDED=100000000uerth\n"
 assert s.count(anchor) == 1, "VALIDATOR_BONDED anchor moved"
 s = s.replace(anchor, anchor + f"      - VALIDATOR_MNEMONIC={env['VALIDATOR_MNEMONIC']}\n")
 
+# node: the consensus key named in the genesis gentx, and the node key that
+# fixes the peer id. Base64 in .env, passed through verbatim -- the entrypoint
+# decodes them. Raw JSON here would be a YAML flow mapping, not a string.
+#
+# PRIV_VALIDATOR_KEY_B64 is the key that can double-sign. It is in this file for
+# a single-validator devnet whose whole state is disposable; a validator with
+# real stake should use PRIV_VALIDATOR_LADDR and a remote signer instead
+# (akash/REMOTE_SIGNER.md).
+for var in ("PRIV_VALIDATOR_KEY_B64", "NODE_KEY_B64"):
+    if env.get(var):
+        s = s.replace(anchor, anchor + f"      - {var}={env[var]}\n")
+
 # cloudflared: the tunnel token replaces the empty env list
 anchor = "    env: []\n"
 assert s.count(anchor) == 1, "cloudflared env anchor moved"
@@ -66,7 +80,25 @@ def envmap(name):
     return dict(e.split("=", 1) for e in (svcs[name].get("env") or []))
 
 n, c, r = envmap("node"), envmap("cloudflared"), envmap("relayer")
-assert n.get("DEV_INIT") == "1", "DEV_INIT not set — fresh volume would produce no blocks"
+# A fresh volume has to end up with a validator signing blocks, and there are
+# exactly two ways for that to happen. DEV_INIT=1 builds a throwaway chain and
+# makes its own. DEV_INIT=0 joins the image's genesis, which only produces
+# blocks if that genesis already names a validator AND this node holds the
+# matching consensus key. Asserting DEV_INIT=1 outright was right while the
+# release genesis had no gentx; now it would forbid the correct configuration.
+if n.get("DEV_INIT") == "1":
+    pass
+else:
+    assert n.get("PRIV_VALIDATOR_KEY_B64"), (
+        "DEV_INIT=0 with no PRIV_VALIDATOR_KEY_B64 — this node would join with a "
+        "random consensus key, hold no voting power, and the chain would have no "
+        "signer. Set it in .env, or set DEV_INIT=1 for a throwaway chain.")
+    try:
+        k = json.loads(base64.b64decode(n["PRIV_VALIDATOR_KEY_B64"]))
+    except Exception as e:
+        raise AssertionError("PRIV_VALIDATOR_KEY_B64 is not base64 of JSON: %s" % e)
+    assert "priv_key" in k and "address" in k, "PRIV_VALIDATOR_KEY_B64 is not a priv_validator_key.json"
+
 assert n.get("CHAIN_ID") == "earth-1"
 mn = n.get("VALIDATOR_MNEMONIC", "")
 assert len(mn.split()) in (12, 24), "validator mnemonic missing/malformed"
@@ -85,6 +117,12 @@ assert img == svcs["relayer"]["image"], "node and relayer images differ"
 print("services:   ", ", ".join(sorted(svcs)))
 print("node image: ", img)
 print("DEV_INIT:   ", n["DEV_INIT"], " CHAIN_ID:", n["CHAIN_ID"], " MIN_GAS:", n.get("MIN_GAS_PRICES"))
+if n.get("DEV_INIT") != "1":
+    kd = json.loads(base64.b64decode(n["PRIV_VALIDATOR_KEY_B64"]))
+    print("consensus:   %s (from PRIV_VALIDATOR_KEY_B64)" % kd["address"])
+    print("node key:    %s" % ("injected" if n.get("NODE_KEY_B64") else "MISSING - node id will change on reset"))
+    print("reset:       RESET_ON_GENESIS_MISMATCH=%s" % n.get("RESET_ON_GENESIS_MISMATCH", "0"))
+    print("external:    %s" % n.get("EXTERNAL_ADDRESS", "UNSET - peers cannot dial this node"))
 print("secrets:     VALIDATOR_MNEMONIC(%d words), TUNNEL_TOKEN(%d chars)"
       % (len(n["VALIDATOR_MNEMONIC"].split()), len(c["TUNNEL_TOKEN"])))
 print("relayer:     ENABLED=%s%s" % (r["ENABLED"],

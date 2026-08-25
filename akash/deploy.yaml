@@ -25,7 +25,7 @@ services:
     # A version tag is mutable and a digest is not; on a chain the difference
     # between "the image I tested" and "an image with that name" is a consensus
     # failure. The workflow fails the release if its pattern stops matching.
-    image: ghcr.io/zenopie/earth-network-chain@sha256:66c4fedd601ac16a4d1e2d62db451068fc9e9b89d99140beb18688c35e6732f8
+    image: ghcr.io/zenopie/earth-network-chain@sha256:e92a73589527ee23126042260651cff0e30b86c6f1e02feff13e17c91c5475b1
 
     env:
       - CHAIN_ID=earth-1
@@ -53,7 +53,32 @@ services:
       # genesis hash and the block history but not who signs.
       #
       # Take this back out for a node that is meant to join a real network.
-      - DEV_INIT=1
+      # DEV_INIT is now OFF. networks/genesis.json carries a real gentx, so the
+      # published genesis is the one this chain actually runs -- which is what
+      # makes a second validator able to join it. While DEV_INIT was on, every
+      # boot stamped its own genesis_time and collected its own gentx, so the
+      # live chain and the published file were different chains that happened to
+      # share a chain id.
+      - DEV_INIT=0
+      #
+      # The consensus key the genesis gentx names, and the node key that fixes
+      # the peer id, are injected from .env by bin/build-sdl.py. Without the
+      # first, a reset volume comes up as a validator with no voting power and
+      # the chain has no signer at all.
+      #
+      # One-shot cutover switch. The volume holds the old DEV_INIT chain, whose
+      # genesis differs from the image's, and this says "throw it away and join
+      # the image's chain". Safe to leave set: it is keyed to the genesis hash,
+      # so it fires on the first boot after the genesis changes and never again.
+      # It DESTROYS ALL CHAIN STATE when it fires.
+      - RESET_ON_GENESIS_MISMATCH=1
+      #
+      # What peers are told to dial. Without it the node advertises its pod
+      # address -- 0.0.0.0 in practice -- and nothing outside the cluster can
+      # reach it, which is why the chain sat at n_peers 0 with the port open.
+      # The provider assigns this port; re-read it from the lease status after
+      # any structural change.
+      - EXTERNAL_ADDRESS=provider.akash-palmito.org:30982
       #
       # ---- upgrades --------------------------------------------------------
       #
@@ -217,7 +242,7 @@ services:
   # else. The failure mode is delay, not theft.
   relayer:
     # PINNED BY CI alongside the node's image; both are this repo.
-    image: ghcr.io/zenopie/earth-network-chain@sha256:66c4fedd601ac16a4d1e2d62db451068fc9e9b89d99140beb18688c35e6732f8
+    image: ghcr.io/zenopie/earth-network-chain@sha256:e92a73589527ee23126042260651cff0e30b86c6f1e02feff13e17c91c5475b1
     command:
       - /usr/local/bin/relayer.sh
     env:
