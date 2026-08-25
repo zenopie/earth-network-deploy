@@ -55,6 +55,37 @@ services:
       # Take this back out for a node that is meant to join a real network.
       - DEV_INIT=1
       #
+      # ---- upgrades --------------------------------------------------------
+      #
+      # Run earthd under cosmovisor. At an upgrade height the chain halts on
+      # purpose and will not continue on the old binary; without this, that halt
+      # lasts until a human redeploys this file with a new image digest. With it,
+      # cosmovisor reads the plan the chain wrote, downloads the binary the
+      # governance proposal names, checks it against the checksum in the URL,
+      # swaps it in and restarts.
+      #
+      # The binary it downloads is a release tarball from the chain repo, which
+      # carries its own lib/ -- earthd links libwasmvm dynamically and the two
+      # are version-locked, so an upgrade that changed the CosmWasm version would
+      # otherwise start the new binary against the old image's libwasmvm.
+      - USE_COSMOVISOR=true
+      #
+      # Defaults the entrypoint already sets, spelled out because they are worth
+      # seeing at the deployment level:
+      #
+      #   DAEMON_DOWNLOAD_MUST_HAVE_CHECKSUM=true
+      #     never turn this off. With downloads on, the checksum is the only
+      #     thing tying what runs to what governance approved.
+      #   UNSAFE_SKIP_BACKUP=false
+      #     cosmovisor copies data/ before upgrading, so it needs the volume to
+      #     hold two copies of chain state at once. It is the only rollback that
+      #     exists if an upgrade handler corrupts state. Watch the volume size
+      #     as history grows rather than turning this off first.
+      #
+      # After an upgrade, the running binary is the downloaded one, not the one
+      # in the pinned digest above. `earthd version` and the image digest will
+      # disagree until the digest is bumped to match -- that is expected.
+      #
       # ---- browser access -------------------------------------------------
       #
       # Measured against this deployment on 2026-08-20: the LCD answers every
