@@ -201,20 +201,37 @@ services:
       - COUNTERPARTY_PREFIX=inj
       # Injective is Ethereum-style: coin type 60 and ethsecp256k1 keys, not the
       # Cosmos defaults. Both are required or rly signs with the wrong key.
+      #
+      # "injective", NOT "ethermint". rly ships both, and the obvious guess is
+      # wrong: Injective defines its own account type,
+      # /injective.types.v1beta1.EthAccount, rather than reusing ethermint's
+      # /ethermint.types.v1.EthAccount. With the wrong codec rly cannot decode
+      # the account to read its sequence number, and every transaction fails
+      # before it is signed with
+      #   no concrete type registered for type URL
+      #   /injective.types.v1beta1.EthAccount against interface *types.AccountI
       - COUNTERPARTY_COIN_TYPE=60
-      - COUNTERPARTY_EXTRA_CODECS="ethermint"
+      - COUNTERPARTY_EXTRA_CODECS="injective"
       # Injective's minimum is 160000000inj per gas unit, and INJ has 18
       # decimals. Set with headroom, as with any chain whose floor can move.
       - COUNTERPARTY_GAS_PRICES=500000000inj
-      # true for ONE deploy, to create the client, connection and channel. Put
-      # it back to false afterwards: linking spends gas on both chains and is
-      # not something a container restart should retry.
-      # true for ONE deploy to build the Injective path, then back to false with
-      # SRC_/DST_CLIENT_ID and SRC_/DST_CONNECTION_ID filled in from
+      # Set true for ONE deploy to build a new path, then straight back to
+      # false with the ids below filled in from
       #   /ibc/core/connection/v1/connections/<id>
-      # Without those pinned, the config rebuilt on each boot has no connection
-      # and rly relays nothing while looking perfectly healthy.
-      - LINK_ON_START=true
+      # Linking spends gas on both chains and is not something a container
+      # restart should retry.
+      - LINK_ON_START=false
+      #
+      # The earth <-> injective-888 path, built 2026-08-25 and pinned here.
+      # rly's config is rebuilt from env on every boot, so without these it
+      # would forget the path and link a brand new client each restart -- which
+      # is exactly what the five orphaned 07-tendermint-* clients on earth are.
+      # Pinned ids make a restart resume the existing path instead.
+      - SRC_CLIENT_ID=07-tendermint-12
+      - DST_CLIENT_ID=07-tendermint-501
+      - SRC_CONNECTION_ID=connection-1
+      - DST_CONNECTION_ID=connection-407
+      # earth channel-1 <-> injective-888 channel-77143, port transfer.
       # Names the path in rly's config and in its logs. Defaults to "earth-hub",
       # which is wrong for any counterparty that is not the Cosmos Hub.
       - PATH_NAME=earth-inj
