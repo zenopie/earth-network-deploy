@@ -1,0 +1,6 @@
+# The secrets injected into the submitted SDL: the Akash API key (which can close
+# a lease, and closing destroys the chain's volumes), the tunnel token, the
+# validator mnemonic and the relayer mnemonic. This repository is private, but
+# private is not the same as "safe to commit a key to".
+.env*
+!.env.example

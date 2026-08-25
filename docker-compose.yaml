@@ -1,0 +1,25 @@
+# Release: https://github.com/zenopie/earth-network-chain/releases/tag/v0.4.4
+# Workflow URL: https://github.com/zenopie/earth-network-chain/actions/runs/32840666616
+# Commit: https://github.com/zenopie/earth-network-chain/commit/9600bcd21c3918bac28111e8c4170bcc539b2ed0
+# Dockerfile Path: Dockerfile
+# Docker Compose Location: ./docker-compose.yaml
+version: '3'
+services:
+  app:
+    image: ghcr.io/zenopie/earth-network-chain@sha256:1ba8ca6dc230bd85768ccc3a6534e6383253874c85a723a2ac02c25c02794433
+    ports:
+      # Explicit host mappings: EARTH_NODE_URL and both wallet apps need
+      # a fixed address. The short form publishes on a random host port.
+      - '1317:1317'   # LCD  — wallet apps and the ads-for-gas backend
+      - '26657:26657' # RPC  — the explorer's block-range queries
+    volumes:
+      # Genesis, the validator's consensus key and all chain state.
+      # Without this a redeploy does not restart the chain, it creates a
+      # different one: new genesis, new keys, and every address the apps
+      # knew about stops existing. The entrypoint tells the two cases
+      # apart purely by whether /data/config/genesis.json is present.
+      - earth-data:/data
+    restart: unless-stopped
+
+volumes:
+  earth-data:

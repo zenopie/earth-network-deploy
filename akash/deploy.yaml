@@ -1,0 +1,335 @@
+---
+# Akash SDL — earth chain node + its Cloudflare tunnel.
+#
+# The ads-for-gas service is its own repo, its own image and its own lease
+# (earth-network-backend). That separation is deliberate: closing a lease
+# destroys its volumes, and this one holds the chain's — genesis, the
+# validator's consensus key, every account. A backend change must never be able
+# to take that with it.
+#
+# Deploy with the Console API (credit-card / managed wallet):
+#   POST /v1/deployments  {"data":{"sdl":"<this file>","deposit":5}}
+# See README.md in this directory.
+#
+# Closing this lease destroys the chain's state — genesis, the validator's
+# consensus key, every account. Structural edits (adding a service, changing resources or exposed ports)
+# cannot be applied in place and require exactly that. Image and env changes can
+# be pushed with PUT /v1/deployments/{dseq} and keep the volumes.
+version: "2.0"
+
+services:
+  # --- the chain -----------------------------------------------------------
+  node:
+    # PINNED BY CI — .github/workflows/docker-build.yml rewrites every `image:`
+    # line here with the digest it just pushed and commits it back to master.
+    # A version tag is mutable and a digest is not; on a chain the difference
+    # between "the image I tested" and "an image with that name" is a consensus
+    # failure. The workflow fails the release if its pattern stops matching.
+    image: ghcr.io/zenopie/earth-network-chain@sha256:1ba8ca6dc230bd85768ccc3a6534e6383253874c85a723a2ac02c25c02794433
+
+    env:
+      - CHAIN_ID=earth-1
+      - MONIKER=earth-akash-devnet
+      # Free transactions mean free spam. Per-node config, not a chain parameter,
+      # so this is a restart to change and not a governance vote. ~500uerth on a
+      # typical transaction; ads-for-gas sponsors users, so the fee is not an
+      # adoption barrier.
+      - MIN_GAS_PRICES=0.005uerth
+      #
+      # DEV_INIT=1 makes this a NEW throwaway chain on every fresh volume: its
+      # own genesis_time, its own validator, its own genesis hash. That is what
+      # this deployment has always done, and it is now something you have to ask
+      # for. Without it the node installs the release genesis, verifies it
+      # against the published sha256, creates no keys, and waits — which is what
+      # joining a network looks like, and which produces no blocks until there is
+      # a validator set.
+      #
+      # Set here, because this deployment IS the devnet. The release genesis
+      # carries no gentx — `build-genesis.sh` reports "launching with an empty
+      # validator set" — so on a fresh volume the join path would install it,
+      # verify it, create no keys and then produce no blocks forever, with the
+      # pod reporting ready the whole time. VALIDATOR_MNEMONIC below recovers
+      # the same validator address across rebuilds, so a wipe changes the
+      # genesis hash and the block history but not who signs.
+      #
+      # Take this back out for a node that is meant to join a real network.
+      - DEV_INIT=1
+      #
+      # ---- browser access -------------------------------------------------
+      #
+      # Measured against this deployment on 2026-08-20: the LCD answers every
+      # origin with `access-control-allow-origin: *`, and the RPC answers with no
+      # CORS headers at all — not from the node (cors_allowed_origins = []) and
+      # not from Cloudflare, which adds none. So the web app's page-level traffic
+      # has been going to the LCD, and a browser has never been able to reach the
+      # RPC cross-origin on any deployment of this chain.
+      #
+      # Keplr hides part of that: signing happens in the extension and
+      # keplr.sendTx broadcasts from its background context, neither of which is
+      # subject to page CORS. Anything the page does itself — a StargateClient
+      # query, a SigningStargateClient broadcast — is.
+      - RPC_CORS_ORIGINS=https://erth.network
+      #
+      # The LCD is all-or-nothing: the SDK's API server has a bool and no
+      # allowlist, so this is literally `*`. Scoping it belongs at Cloudflare,
+      # which already terminates both hostnames and can rewrite the header per
+      # origin. At launch the browser-facing LCD should be a separate service
+      # from the block producer; while one node is both, this is the trade.
+      - API_UNSAFE_CORS=1
+      #
+      # Both ignored unless DEV_INIT=1 — the join path creates no accounts.
+      - VALIDATOR_COINS=1000000000000uerth
+      - VALIDATOR_BONDED=100000000uerth
+      #
+      # VALIDATOR_MNEMONIC is NOT in this file, but it is no longer unset: it is
+      # injected into the submitted copy from the gitignored .env, like
+      # TUNNEL_TOKEN. Everything submitted still reaches the provider, so the
+      # devnet validator key is exposed to whoever hosts the lease. That is a
+      # deliberate trade, made on 2026-08-19: with it unset the entrypoint
+      # generates a key and prints the mnemonic once into a container log the
+      # Console API cannot read, which means nobody can fund a test wallet or
+      # seed a DEX pool, because only the validator holds coins at genesis.
+      #
+      # It can only be chosen at genesis. Setting it on an existing chain does
+      # nothing — the entrypoint skips key creation once /data/config/genesis.json
+      # exists — so changing your mind costs another wipe.
+      #
+      # Remote consensus signer. The node stops holding its own consensus key
+      # and asks tmkms for every signature instead — see REMOTE_SIGNER.md.
+      #
+      # This FAILS CLOSED: with this set and no signer answering, the node
+      # produces no blocks at all. Do not deploy it until tmkms is running with
+      # the real consensus key imported and the tunnel is up, in that order.
+      # Deferred until there is a dedicated signer host. Uncomment this line
+      # AND the 26659 expose block together — never one without the other.
+      # - PRIV_VALIDATOR_LADDR=tcp://0.0.0.0:26659
+
+    expose:
+      # Tunnel-only. Nothing is published on a provider port: every entry below
+      # goes to `cloudflared`, so the only way in is a Cloudflare hostname.
+      # Verified serving before the mapped ports were removed, because dropping
+      # them is a structural change and cannot be undone in place.
+      # LCD. Not `as: 80`: that asks the provider for an HTTP ingress on a
+      # generated hostname, and on the first lease of this deployment the pod
+      # went ready and served RPC while the hostname returned nginx 404 for ten
+      # minutes — indistinguishable from a hostname never registered. Mapped
+      # ports came up immediately.
+      - port: 1317
+        as: 1317
+        to:
+          - service: cloudflared
+      - port: 26657
+        as: 26657
+        to:
+          - service: cloudflared
+      # Consensus signer. `to: service: cloudflared` is load-bearing here, not
+      # tidiness: this socket cannot authenticate whoever connects, so anyone
+      # who reaches it can ask the KMS to sign votes the validator never cast.
+      # Never give this one `global: true`, not even briefly while debugging.
+      # - port: 26659
+      #   as: 26659
+      #   to:
+      #     - service: cloudflared
+      #
+      # p2p. `global: true` and a provider port, not the tunnel: peers speak
+      # CometBFT's own protocol over raw TCP, and cloudflared serves HTTP to
+      # browsers. A tunnelled 26656 would be reachable and useless.
+      #
+      # The provider maps this to a port of its choosing, so once the lease is
+      # up, read the assigned host:port from the lease status and set
+      # EXTERNAL_ADDRESS to it. Skip that and the node advertises its pod
+      # address to every peer it meets, which no one outside the cluster can
+      # dial — it will connect out and never be connectable.
+      #
+      # Adding this port is a structural change: it cannot be applied to a
+      # running lease with PUT, so it costs a lease replacement, and closing
+      # this lease destroys the volume — genesis, the validator's consensus key,
+      # every account. Do it as part of the genesis cutover, while there is no
+      # state worth keeping.
+      - port: 26656
+        as: 26656
+        to:
+          - global: true
+      # gRPC (9090) stays unexposed: everything here speaks REST.
+
+    params:
+      storage:
+        data:
+          # Genesis, the validator's consensus key, and all chain state.
+          mount: /data
+          readOnly: false
+
+  # --- the tunnel ----------------------------------------------------------
+  # Dials out to Cloudflare, so it needs no inbound port and nothing is exposed
+  # for it. One connector serves every hostname because both origins are in this
+  # deployment and reachable by service name — which is exactly the case where a
+  # single tunnel is correct. Tunnel replicas are chosen by proximity with no
+  # traffic steering, so connectors that could reach different origins would
+  # black-hole a share of requests non-deterministically.
+  #
+  # Public Hostnames are configured on Cloudflare's side, pointing at:
+  #   lcd.*  -> http://node:1317
+  #   rpc.*  -> http://node:26657
+  #
+  # The backend has its own tunnel in its own repo; one tunnel per deployment,
+  # because a tunnel's replicas are chosen by proximity with no traffic
+  # steering, so connectors reaching different origins would black-hole traffic.
+  # IBC relayer. OFF by default — see docker/relayer.sh.
+  #
+  # Same image as the node, deliberately: one image is one digest for CI to pin
+  # and one artefact to reason about. The relayer binary is just a second entry
+  # point in it.
+  #
+  # Co-locating this with the validator is safe in a way nothing else in this
+  # repo is. A relayer cannot forge packets or move funds — it only submits
+  # proofs both chains verify themselves — so its key pays gas and holds nothing
+  # else. The failure mode is delay, not theft.
+  relayer:
+    # PINNED BY CI alongside the node's image; both are this repo.
+    image: ghcr.io/zenopie/earth-network-chain@sha256:1ba8ca6dc230bd85768ccc3a6534e6383253874c85a723a2ac02c25c02794433
+    command:
+      - /usr/local/bin/relayer.sh
+    env:
+      # The switch. Anything other than "true" and the container idles.
+      - ENABLED=true
+      #
+      # Everything below is read only when ENABLED=true, and only the first time
+      # — the config is written once into /data/relayer and reused after that.
+      #
+      - COUNTERPARTY_CHAIN_ID=injective-888
+      - COUNTERPARTY_RPC=https://testnet.sentry.tm.injective.network:443
+      - COUNTERPARTY_PREFIX=inj
+      # Injective is Ethereum-style: coin type 60 and ethsecp256k1 keys, not the
+      # Cosmos defaults. Both are required or rly signs with the wrong key.
+      - COUNTERPARTY_COIN_TYPE=60
+      - COUNTERPARTY_EXTRA_CODECS="ethermint"
+      # Injective's minimum is 160000000inj per gas unit, and INJ has 18
+      # decimals. Set with headroom, as with any chain whose floor can move.
+      - COUNTERPARTY_GAS_PRICES=500000000inj
+      # true for ONE deploy, to create the client, connection and channel. Put
+      # it back to false afterwards: linking spends gas on both chains and is
+      # not something a container restart should retry.
+      # true for ONE deploy to build the Injective path, then back to false with
+      # SRC_/DST_CLIENT_ID and SRC_/DST_CONNECTION_ID filled in from
+      #   /ibc/core/connection/v1/connections/<id>
+      # Without those pinned, the config rebuilt on each boot has no connection
+      # and rly relays nothing while looking perfectly healthy.
+      - LINK_ON_START=true
+      # Names the path in rly's config and in its logs. Defaults to "earth-hub",
+      # which is wrong for any counterparty that is not the Cosmos Hub.
+      - PATH_NAME=earth-inj
+      #
+      # EARTH_GAS_PRICES defaults to 0.006uerth, just above the node's
+      # MIN_GAS_PRICES. Only set it here if you raise the node's minimum.
+      # - EARTH_GAS_PRICES=0.006uerth
+      #
+      # RELAYER_MNEMONIC is NOT set here. Everything in this file reaches the
+      # provider, and while this key only pays gas, a mnemonic in a public repo
+      # is a mnemonic on the internet. Inject it at deploy time like
+      # TUNNEL_TOKEN.
+    expose: []
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    # `cloudflared` first: Akash's `command` maps to Kubernetes `command`, which
+    # REPLACES the image entrypoint rather than appending to it. Without the
+    # binary name the container tries to exec something called `tunnel` and the
+    # service never starts — the lease reports available=0/1 with no other clue.
+    command:
+      - cloudflared
+      - tunnel
+      - --no-autoupdate
+      # Akash rejects a manifest with "zero global services", so something must
+      # be published. Publishing cloudflared's own metrics rather than the
+      # application keeps the chain and the service reachable only through the
+      # tunnel, and /ready gives a way to check connector health without the
+      # Cloudflare dashboard — which matters here because the Console API has no
+      # logs endpoint, and a connector that fails to start is otherwise silent.
+      - --metrics
+      - 0.0.0.0:2000
+      - run
+
+    expose:
+      - port: 2000
+        as: 2000
+        to:
+          - global: true
+    # TUNNEL_TOKEN is injected at deploy time from .env, like the mnemonic.
+    # Anyone holding it can attach a replica and receive this tunnel's traffic.
+    env: []
+
+profiles:
+  compute:
+    node:
+      resources:
+        # Sized for a single-operator test chain with no load. NOT sized for
+        # MsgRegister, which verifies a passport proof with the native UltraHonk
+        # verifier and is by far the most expensive thing the chain does — raise
+        # cpu and memory before testing registration in earnest.
+        cpu:
+          units: 0.5
+        memory:
+          size: 1Gi
+        storage:
+          # Root has to fit the shared image: earthd, the UltraHonk verifier and
+          # its libc++ runtime, plus the Python service and its dependencies.
+          - size: 4Gi
+          - name: data
+            size: 5Gi
+            attributes:
+              persistent: true
+              # beta3, not beta2: of the providers online when this was written,
+              # 41 advertised beta3 against 3 for beta2.
+              class: beta3
+
+    relayer:
+      resources:
+        # Idle when disabled; when enabled it polls two chains and submits
+        # small transactions. Neither is demanding.
+        cpu:
+          units: 0.1
+        memory:
+          size: 256Mi
+        storage:
+          - size: 512Mi
+
+    cloudflared:
+      resources:
+        # A Go binary holding four outbound connections.
+        cpu:
+          units: 0.1
+        memory:
+          size: 128Mi
+        storage:
+          - size: 512Mi
+
+  placement:
+    dcloud:
+      pricing:
+        # Bid ceilings, not the price paid.
+        node:
+          denom: uakt
+          amount: 10000
+        relayer:
+          denom: uakt
+          amount: 10000
+        cloudflared:
+          denom: uakt
+          amount: 10000
+
+deployment:
+  node:
+    dcloud:
+      profile: node
+      # MUST stay 1. A second replica is not a second node on this network; it
+      # is a second chain booting the same genesis with its own validator key,
+      # diverging from the first block it signs.
+      count: 1
+  relayer:
+    dcloud:
+      profile: relayer
+      count: 1
+  cloudflared:
+    dcloud:
+      profile: cloudflared
+      count: 1

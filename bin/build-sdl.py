@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Build the SDL that actually gets submitted: akash/deploy.yaml + the image
+digest for a released tag + secrets from .env.
+
+Textual insertion, not a YAML round-trip, so the committed file's comments and
+exact shape survive into what the provider receives. A round-trip would also
+risk turning version: "2.0" into a float, which the SDL parser rejects.
+"""
+import os, re, sys, yaml
+
+repo   = sys.argv[1]           # this repo
+out    = sys.argv[2]           # where to write the submitted copy
+digest = sys.argv[3] if len(sys.argv) > 3 else None   # ghcr.io/...@sha256:...
+
+env = {}
+for line in open(os.path.join(repo, ".env")):
+    line = line.strip()
+    if line and not line.startswith("#") and "=" in line:
+        k, v = line.split("=", 1)
+        v = v.strip()
+        # Strip surrounding quotes the way `source .env` would. Without this the
+        # quotes travel into the SDL as part of the value, and the container gets
+        # a mnemonic that starts with a double quote -- which BIP39 rejects with
+        # "invalid mnemonic", killing DEV_INIT at key recovery.
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        env[k.strip()] = v
+
+s = open(os.path.join(repo, "akash/deploy.yaml")).read()
+
+# Pin the image at deploy time rather than at build time. The chain repo used to
+# rewrite this and commit it back; it no longer knows this file exists.
+if digest:
+    s, n = re.subn(r'(?m)^(\s*image:\s*)ghcr\.io/\S+', r'\1' + digest, s)
+    assert n, "no ghcr image line to pin"
+    print("pinned %d image line(s) to %s" % (n, digest.split("@")[-1][:19] + "…"))
+
+# node: the devnet validator key, appended after the last VALIDATOR_* line
+anchor = "      - VALIDATOR_BONDED=100000000uerth\n"
+assert s.count(anchor) == 1, "VALIDATOR_BONDED anchor moved"
+s = s.replace(anchor, anchor + f"      - VALIDATOR_MNEMONIC={env['VALIDATOR_MNEMONIC']}\n")
+
+# cloudflared: the tunnel token replaces the empty env list
+anchor = "    env: []\n"
+assert s.count(anchor) == 1, "cloudflared env anchor moved"
+s = s.replace(anchor, f"    env:\n      - TUNNEL_TOKEN={env['TUNNEL_TOKEN']}\n")
+
+# relayer: its key, only when the service is actually on. Injected the same way
+# and for the same reason as the other two — it reaches the provider either way,
+# what this avoids is it reaching a public repository.
+anchor = "      - LINK_ON_START="
+if anchor in s:
+    line = s[s.index(anchor):]
+    line = line[:line.index("\n") + 1]
+    s = s.replace(line, line + f"      - RELAYER_MNEMONIC={env['RELAYER_MNEMONIC']}\n")
+
+open(out, "w").write(s)
+
+# Verify what we built rather than trusting the string edits.
+d = yaml.safe_load(s)
+assert d["version"] == "2.0", f'version became {d["version"]!r}'
+svcs = d["services"]
+assert set(svcs) == {"node", "relayer", "cloudflared"}, sorted(svcs)
+
+def envmap(name):
+    return dict(e.split("=", 1) for e in (svcs[name].get("env") or []))
+
+n, c, r = envmap("node"), envmap("cloudflared"), envmap("relayer")
+assert n.get("DEV_INIT") == "1", "DEV_INIT not set — fresh volume would produce no blocks"
+assert n.get("CHAIN_ID") == "earth-1"
+mn = n.get("VALIDATOR_MNEMONIC", "")
+assert len(mn.split()) in (12, 24), "validator mnemonic missing/malformed"
+assert not any(c in mn for c in "\"'"), "mnemonic carries quote characters; BIP39 will reject it"
+assert mn == mn.strip(), "mnemonic has leading/trailing whitespace"
+assert c.get("TUNNEL_TOKEN", "").startswith("eyJ"), "tunnel token missing or not a JWT"
+if r.get("ENABLED") == "true":
+    rm = r.get("RELAYER_MNEMONIC", "")
+    assert len(rm.split()) in (12, 24), "relayer enabled but its mnemonic is missing/malformed"
+    assert not any(c in rm for c in "\"'"), "relayer mnemonic carries quote characters"
+    for k in ("COUNTERPARTY_CHAIN_ID", "COUNTERPARTY_RPC", "COUNTERPARTY_PREFIX"):
+        assert r.get(k), f"relayer enabled but {k} is unset"
+
+img = svcs["node"]["image"]
+assert img == svcs["relayer"]["image"], "node and relayer images differ"
+print("services:   ", ", ".join(sorted(svcs)))
+print("node image: ", img)
+print("DEV_INIT:   ", n["DEV_INIT"], " CHAIN_ID:", n["CHAIN_ID"], " MIN_GAS:", n.get("MIN_GAS_PRICES"))
+print("secrets:     VALIDATOR_MNEMONIC(%d words), TUNNEL_TOKEN(%d chars)"
+      % (len(n["VALIDATOR_MNEMONIC"].split()), len(c["TUNNEL_TOKEN"])))
+print("relayer:     ENABLED=%s%s" % (r["ENABLED"],
+      "  -> " + r.get("COUNTERPARTY_CHAIN_ID", "") + "  link=" + r.get("LINK_ON_START", "false")
+      if r["ENABLED"] == "true" else ""))
+print("wrote", out, "(%d bytes)" % len(s))
