@@ -45,18 +45,17 @@ ephemeral storage is a poor place to run one.
 The entrypoint writes it into config.toml. Unset, nothing changes and the node
 signs locally as it does today.
 
-Then expose 26659 to the tunnel service only — never `global: true`. Treat that
-as load-bearing, not tidiness: **this port must not be reachable by anyone but
-the KMS.** See "What the privval socket does not protect" below.
+Then expose 26659 to the tunnel service only — never `global: true`:
 
     expose:
       - port: 26659
         to:
           - service: cloudflared
 
-On Cloudflare, add a Public Hostname of type **TCP**:
-
-    signer.erth.network -> tcp://node:26659
+That keeps the socket off a provider port, so there is no `IP:port` for a
+scanner to find. It is necessary and it is nowhere near sufficient — it removes
+the direct route, not the reachability. How the signer then reaches it is the
+decision that matters; see "Two ways to route it" below.
 
 ## What the privval socket does not protect
 
@@ -88,16 +87,66 @@ double-sign guard in `state/earth-consensus.json` blocks conflicting votes at or
 below the heights it has already seen, but it cannot tell a forged future height
 from a real one.
 
-Authentication therefore has to come from the transport, which is why the port
-is exposed only to `cloudflared` and reached through the tunnel. Do not
-shortcut that with a plain `global: true` port even temporarily.
+Authentication therefore has to come from the transport, and `to: service:
+cloudflared` is not it — that only removes the direct route. Do not shortcut it
+with a plain `global: true` port even temporarily, and do not mistake it for the
+control that keeps strangers out. That control is the Access policy in
+the next section. Without one attached, the socket is open to whoever finds the
+hostname.
 
-## Home side
+## Routing it: public hostname + Access service token
 
-    cloudflared access tcp --hostname signer.erth.network --url localhost:26659
-    tmkms start -c tmkms.toml
+Add a Public Hostname of type **TCP**:
 
-tmkms then points at `localhost:26659` and the tunnel carries it.
+    signer.erth.network -> tcp://node:26659
+
+Note that this addresses the node by *name*. cloudflared resolves `node` through
+the lease's internal service DNS, so the pod's address changing across redeploys
+costs nothing — which is the reason this shape and not a private CIDR route.
+Routing a private network to a pod means pinning an address the provider
+assigns and may recycle, and a stale route points at another tenant.
+
+A Public Hostname is exactly that: public. It is not a private address and the
+tunnel is not an authenticator — `cloudflared access tcp` is an ordinary client
+and anyone may point one at that name. What keeps them out is the Access policy,
+and because both ends are machines it wants a **service token**, not an identity
+provider login:
+
+1. Zero Trust -> Access -> Service Auth -> create a service token. Cloudflare
+   shows the Client Secret **once**; it cannot be retrieved later, only replaced.
+2. Zero Trust -> Access -> Applications -> add a **Self-hosted** application for
+   `signer.erth.network`.
+3. One policy, action **Service Auth** — not Allow, which expects a human to
+   authenticate to an IdP and will lock out a headless signer — with an include
+   rule of `Service Token` -> the token from step 1.
+
+Home side:
+
+    cloudflared access tcp --hostname signer.erth.network --url localhost:26659 \
+      --service-token-id "$CF_ACCESS_CLIENT_ID" \
+      --service-token-secret "$CF_ACCESS_CLIENT_SECRET"
+    tmkms start -c tmkms.toml        # addr = tcp://127.0.0.1:26659
+
+`earth-tmkms/new-secrets.sh` writes those values to its gitignored `secrets/`.
+
+Then verify the policy is on. From a machine with no token this must be refused:
+
+    cloudflared access tcp --hostname signer.erth.network --url localhost:26699
+
+Do not skip that. An application that was never attached to the hostname looks
+identical to a working one from the authenticated side, and the failure is
+silent in the direction that matters.
+
+Layering `Require -> Gateway` or device posture on top is possible if the signer
+also runs WARP, but think before adding it: this policy sits in front of a
+socket that fails closed. Every additional requirement is one more component
+whose outage produces a validator signing nothing.
+
+### Rotating the token
+
+Two-sided, in this order: issue the new token, add it to the policy, restart the
+home-side `cloudflared`, then revoke the old one. Revoking first drops the
+signer, and a dropped signer is a validator producing no blocks.
 
 ## Migrating a live validator
 

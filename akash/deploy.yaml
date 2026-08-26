@@ -178,10 +178,17 @@ services:
         as: 26657
         to:
           - service: cloudflared
-      # Consensus signer. `to: service: cloudflared` is load-bearing here, not
-      # tidiness: this socket cannot authenticate whoever connects, so anyone
-      # who reaches it can ask the KMS to sign votes the validator never cast.
-      # Never give this one `global: true`, not even briefly while debugging.
+      # Consensus signer. This socket cannot authenticate whoever connects, so
+      # anyone who reaches it can ask the KMS to sign votes the validator never
+      # cast. Never give this one `global: true`, not even briefly while
+      # debugging -- but note that `to: service: cloudflared` is not itself the
+      # protection. It removes the provider port; it does not decide who may
+      # come down the tunnel. That is the Access policy on the hostname; see
+      # akash/REMOTE_SIGNER.md.
+      #
+      # The tunnel's ingress addresses this by service name (tcp://node:26659),
+      # resolved by the lease's internal DNS, so a pod address that changes
+      # across redeploys costs nothing.
       # - port: 26659
       #   as: 26659
       #   to:
