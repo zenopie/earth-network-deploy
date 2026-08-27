@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+#
+# Create a NEW lease for the node, and print the DSEQ it got.
+#
+#   bin/create.sh v0.4.10                      pick the cheapest bid, ask first
+#   bin/create.sh v0.4.10 --provider akash1..  take that provider's bid
+#   bin/create.sh v0.4.10 --yes                do not ask
+#   bin/create.sh v0.4.10 --sdl-only           build and validate the SDL, send nothing
+#
+# This is NOT deploy.sh. deploy.sh updates a running deployment in place with
+# PUT, which keeps the volumes and therefore the chain's height and history.
+# There is no in-place path from "no lease" to "a lease", so this exists for the
+# two occasions that need one: the first launch, and a close-and-recreate after
+# a structural change (endpoint kinds and resources are part of what a provider
+# bid on, so PUT rejects them).
+#
+# A new lease means a NEW VOLUME. The chain starts at height 1 from the genesis
+# baked into the image. Every account, every registration and all history from
+# the previous lease is gone — that is what closing it did, and this cannot undo
+# it. build-sdl.py refuses to build an SDL that would come up without a signer,
+# which is the one way this goes wrong quietly.
+#
+# Afterwards, two things still need doing and neither is automatic:
+#
+#   1. EXTERNAL_ADDRESS in akash/deploy.yaml is the p2p address peers dial, and
+#      the provider assigns the port, so the old lease's value is now wrong.
+#      It is not urgent while this is the only node: the tunnel carries lcd and
+#      rpc, p2p is the one thing on a provider port because CometBFT's protocol
+#      is not HTTP and cloudflared could not usefully proxy it. A stale value
+#      only means the node is not connectable *inbound* — it still dials out.
+#      It matters the day a second node wants to join.
+#   2. The ads-for-gas backend has its own lease and its own EARTH_NODE_URL.
+#      Point it at the tunnel (https://lcd.erth.network), never at a provider
+#      hostname — from inside the same provider's cluster that is a hairpin that
+#      hangs rather than fails.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+API=https://console-api.akash.network/v1
+
+TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only]}"
+shift
+
+PROVIDER=""; DEPOSIT=5; ASSUME_YES=0; SDL_ONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --provider) PROVIDER="${2:?--provider needs an address}"; shift 2 ;;
+    --deposit)  DEPOSIT="${2:?--deposit needs a number}"; shift 2 ;;
+    --yes)      ASSUME_YES=1; shift ;;
+    --sdl-only) SDL_ONLY=1; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+[ -f "$HERE/.env" ] || { echo "no .env — it holds the secrets injected into the submitted SDL" >&2; exit 1; }
+set -a; . "$HERE/.env"; set +a
+: "${AKASH_API_KEY:?set AKASH_API_KEY in .env}"
+
+# Everything the API returns is kept here rather than piped through, so a
+# surprise in a response shape can be read afterwards instead of being lost with
+# the pipeline that failed on it. It holds the SDL, which holds the secrets.
+WORK="$(mktemp -d)"; chmod 700 "$WORK"; trap 'rm -rf "$WORK"' EXIT
+
+# The API echoes the manifest back, and the manifest carries every secret that
+# was injected into the SDL — the tunnel token, the validator mnemonic, the
+# consensus key. So a failure prints a redacted body, never the raw one. This
+# was learned the hard way: an unexpected status code dumped the token to a
+# terminal, and it had to be rotated.
+show_response() {
+  python3 - "$1" <<'REDACT'
+import json, re, sys
+raw = open(sys.argv[1]).read()
+raw = re.sub(r'((?:TUNNEL_TOKEN|MNEMONIC|PRIV_VALIDATOR_KEY_B64|NODE_KEY_B64|API_KEY)[^\s",]*=)[^"\\,\s]+',
+             r'\1<redacted>', raw)
+try:
+    d = json.loads(raw)
+    if isinstance(d, dict):
+        for k in ("manifest", "sdl"):
+            if k in d.get("data", {}): d["data"][k] = "<redacted>"
+            if k in d: d[k] = "<redacted>"
+    raw = json.dumps(d)
+except Exception:
+    pass
+sys.stderr.write(raw[:800] + "\n")
+REDACT
+}
+
+DIGEST="$("$HERE/bin/digest.sh" "$TAG")"
+python3 "$HERE/bin/build-sdl.py" "$HERE" "$WORK/sdl.yaml" "$DIGEST"
+
+if [ "$SDL_ONLY" = 1 ]; then
+  echo "sdl built and validated; nothing submitted"
+  exit 0
+fi
+
+# --- 1. create the deployment ------------------------------------------------
+# The SDL goes in as a JSON string, so it is written by a JSON encoder rather
+# than interpolated: it is YAML full of quotes, colons and a base64 key.
+python3 -c "
+import json,sys
+json.dump({'data':{'sdl':open(sys.argv[1]).read(),'deposit':int(sys.argv[2])}}, open(sys.argv[3],'w'))
+" "$WORK/sdl.yaml" "$DEPOSIT" "$WORK/create.json"
+
+CODE=$(curl -sS -m 300 -X POST \
+  -H "x-api-key: ${AKASH_API_KEY}" -H 'content-type: application/json' \
+  --data-binary @"$WORK/create.json" \
+  "$API/deployments" -o "$WORK/created.json" -w '%{http_code}')
+# 2xx, not 200: creating returns 201 and taking the lease returns 200, and
+# rejecting 201 aborted a deployment that had in fact been created and paid for.
+case "$CODE" in 2??) ;; *) echo "create failed (http $CODE)" >&2; show_response "$WORK/created.json"; exit 1 ;; esac
+
+# dseq and manifest are read tolerantly: the response has been seen both bare
+# and wrapped in {"data": ...}, and guessing wrong here loses a deployment that
+# has already been paid for.
+eval "$(python3 - "$WORK/created.json" <<'PY'
+import json, sys, shlex
+d = json.load(open(sys.argv[1]))
+def dig(o, key):
+    if isinstance(o, dict):
+        if key in o: return o[key]
+        for v in o.values():
+            r = dig(v, key)
+            if r is not None: return r
+    elif isinstance(o, list):
+        for v in o:
+            r = dig(v, key)
+            if r is not None: return r
+    return None
+dseq = dig(d, "dseq")
+if dseq is None:
+    sys.exit("no dseq in the create response — read created.json")
+print("DSEQ_NEW=%s" % shlex.quote(str(dseq)))
+PY
+)"
+echo "created deployment $DSEQ_NEW"
+
+# The manifest submitted with the lease must be the one the deployment was
+# created with, so it is taken from the create response when present and rebuilt
+# from the SDL only if it is not.
+python3 - "$WORK/created.json" "$WORK/sdl.yaml" "$WORK/manifest.txt" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+def dig(o, key):
+    if isinstance(o, dict):
+        if key in o: return o[key]
+        for v in o.values():
+            r = dig(v, key)
+            if r is not None: return r
+    elif isinstance(o, list):
+        for v in o:
+            r = dig(v, key)
+            if r is not None: return r
+    return None
+m = dig(d, "manifest")
+open(sys.argv[3], "w").write(m if isinstance(m, str) else "")
+PY
+
+# --- 2. wait for bids --------------------------------------------------------
+# Providers bid asynchronously; an empty list a second after creating means
+# nobody has answered yet, not that nobody will.
+echo -n "waiting for bids"
+for _ in $(seq 1 30); do
+  curl -sS -m 60 -H "x-api-key: ${AKASH_API_KEY}" "$API/bids/$DSEQ_NEW" -o "$WORK/bids.json" || true
+  if python3 -c "
+import json,sys
+d=json.load(open('$WORK/bids.json'))
+b=d.get('data',d)
+sys.exit(0 if isinstance(b,list) and b else 1)
+" 2>/dev/null; then echo; break; fi
+  echo -n "."; sleep 5
+done
+
+python3 - "$WORK/bids.json" <<'PY' || { echo "no bids — read bids.json" >&2; exit 1; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+b = d.get("data", d)
+if not (isinstance(b, list) and b): sys.exit(1)
+print("bids:")
+for x in b:
+    bid = x.get("bid", x)
+    bid_id = bid.get("bid_id", bid.get("id", {}))
+    price = bid.get("price", {})
+    print("  %-45s %s %s" % (bid_id.get("provider"), price.get("amount"), price.get("denom")))
+PY
+
+# Cheapest unless told otherwise. Price is the only thing distinguishing bids
+# from here; reputation and location are not in this response.
+CHOSEN="$PROVIDER"
+if [ -z "$CHOSEN" ]; then
+  CHOSEN=$(python3 - "$WORK/bids.json" <<'PY'
+import json, sys
+b = json.load(open(sys.argv[1]))
+b = b.get("data", b)
+def price(x):
+    bid = x.get("bid", x)
+    try: return float(bid.get("price", {}).get("amount", "inf"))
+    except (TypeError, ValueError): return float("inf")
+best = min(b, key=price)
+bid = best.get("bid", best)
+print((bid.get("bid_id") or bid.get("id") or {}).get("provider", ""))
+PY
+)
+fi
+[ -n "$CHOSEN" ] || { echo "could not choose a provider" >&2; exit 1; }
+echo "provider: $CHOSEN"
+
+# The backend must not share a provider with the node — its EARTH_NODE_URL would
+# then be a hairpin into the same cluster, which hangs instead of failing. Only
+# a warning: this script cannot see where the backend is leased.
+echo "check the ads-for-gas backend is NOT leased on $CHOSEN (see akash/README.md)"
+
+if [ "$ASSUME_YES" != 1 ]; then
+  printf 'take the lease? [y/N] '
+  read -r reply
+  case "$reply" in y|Y|yes) ;; *) echo "left deployment $DSEQ_NEW created with no lease; close it or run again with --provider"; exit 1 ;; esac
+fi
+
+# --- 3. take the lease -------------------------------------------------------
+python3 - "$WORK/created.json" "$WORK/manifest.txt" "$CHOSEN" "$DSEQ_NEW" "$WORK/lease.json" <<'PY'
+import json, sys
+created, manifest_path, provider, dseq, out = sys.argv[1:6]
+d = json.load(open(created))
+def dig(o, key):
+    if isinstance(o, dict):
+        if key in o: return o[key]
+        for v in o.values():
+            r = dig(v, key)
+            if r is not None: return r
+    elif isinstance(o, list):
+        for v in o:
+            r = dig(v, key)
+            if r is not None: return r
+    return None
+manifest = open(manifest_path).read()
+# Top level, NOT wrapped in {"data": ...} the way creating a deployment is.
+# The two endpoints disagree, and posting the create shape here returns a
+# validation error naming both fields as missing.
+body = {
+    "manifest": manifest,
+    "leases": [{
+        "owner": dig(d, "owner"),
+        "dseq": str(dseq),
+        # gseq/oseq are 1 for a single-group deployment, which this is —
+        # build-sdl.py asserts the three services and one profile.
+        "gseq": 1, "oseq": 1,
+        "provider": provider,
+    }],
+}
+if not manifest:
+    sys.exit("no manifest — it comes back from creating the deployment and cannot "
+             "be rebuilt from the SDL here; close this deployment and create again")
+json.dump(body, open(out, "w"))
+PY
+
+CODE=$(curl -sS -m 300 -X POST \
+  -H "x-api-key: ${AKASH_API_KEY}" -H 'content-type: application/json' \
+  --data-binary @"$WORK/lease.json" \
+  "$API/leases" -o "$WORK/leased.json" -w '%{http_code}')
+case "$CODE" in 2??) ;; *) echo "lease failed (http $CODE)" >&2; show_response "$WORK/leased.json"; exit 1 ;; esac
+
+echo "leased $DSEQ_NEW on $CHOSEN"
+
+# --- 4. leave the operator with what changed ---------------------------------
+# DSEQ is written back because a stale one silently points deploy.sh at a
+# deployment that no longer exists, and PUT against it fails in a way that reads
+# like an API problem rather than a wrong number.
+cp "$HERE/.env" "$HERE/.env.bak"
+python3 - "$HERE/.env" "$DSEQ_NEW" <<'PY'
+import re, sys
+path, dseq = sys.argv[1], sys.argv[2]
+s = open(path).read()
+s2, n = re.subn(r"^DSEQ=.*$", "DSEQ=%s" % dseq, s, flags=re.M)
+open(path, "w").write(s2 if n else s.rstrip("\n") + "\nDSEQ=%s\n" % dseq)
+PY
+echo "DSEQ updated in .env (previous kept as .env.bak)"
+
+cat <<EOF
+
+still to do:
+  1. point the backend's EARTH_NODE_URL at https://lcd.erth.network and redeploy it
+  2. the chain is at height 1 — Cloudflare needs no change, the tunnel token is the same
+
+not urgent, only matters once a second node exists:
+  3. EXTERNAL_ADDRESS in akash/deploy.yaml still names the old lease's provider
+     port. Read the new one from the lease status and deploy.sh it.
+EOF
