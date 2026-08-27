@@ -254,7 +254,12 @@ services:
       - /usr/local/bin/relayer.sh
     env:
       # The switch. Anything other than "true" and the container idles.
-      - ENABLED=true
+      # Off while the chain is being re-established: a reset takes the IBC
+      # clients, connections and channels with it, and /data/relayer with the
+      # volume, so there is nothing left for it to relay. It would run and log
+      # failures. Turn it back on, with LINK_ON_START=true for one deploy, when
+      # the link is wanted again.
+      - ENABLED=false
       #
       # Everything below is read only when ENABLED=true, and only the first time
       # — the config is written once into /data/relayer and reused after that.
