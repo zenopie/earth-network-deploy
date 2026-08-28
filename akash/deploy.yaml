@@ -78,7 +78,7 @@ services:
       # reach it, which is why the chain sat at n_peers 0 with the port open.
       # The provider assigns this port; re-read it from the lease status after
       # any structural change.
-      - EXTERNAL_ADDRESS=provider.akash-palmito.org:30982
+      - EXTERNAL_ADDRESS=provider.akash-palmito.org:32688
       #
       # ---- upgrades --------------------------------------------------------
       #
