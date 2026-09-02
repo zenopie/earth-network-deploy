@@ -1,4 +1,4 @@
-# Akash SDL — earth-1's validator: the node, its Cloudflare tunnel, the relayer.
+# Akash SDL — earth-1's validator, PARKED: everything identical, nothing running.
 #
 # ONE lease runs earth-1 as of 2026-09-01 (DSEQ in .env). It holds the whole
 # chain — earliest_block_height 1 — because it was rebuilt from block 1 rather
@@ -42,6 +42,19 @@ services:
     # between "the image I tested" and "an image with that name" is a consensus
     # failure. The workflow fails the release if its pattern stops matching.
     image: ghcr.io/zenopie/earth-network-chain@sha256:03c274793328ee4b1a4e38eab302a8b4040a7e27ce0fd35eaa21829331dd4377
+
+    # PARKED. Replaces docker/entrypoint.sh so earthd never starts: the container
+    # comes up, holds the volume and reports healthy while running nothing.
+    # Deployed for one purpose — handing the consensus key to another lease
+    # without the two ever holding it live at once. One validator holds 100% of
+    # the voting power here, so an overlap is not a race to lose gracefully.
+    #
+    # Undo by deploying akash/deploy.yaml.
+    command:
+      - sh
+      - "-c"
+    args:
+      - "echo '[parked] earthd is deliberately NOT started. Deploy akash/deploy.yaml to undo.'; while true; do sleep 3600; done"
 
     env:
       - CHAIN_ID=earth-1
@@ -368,24 +381,22 @@ services:
     expose: []
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # NOT cloudflare/cloudflared: it is distroless and has no shell, so the
+    # parking command cannot exec and the container crash-loops instead of
+    # idling. The chain image is debian-slim and has sh.
+    image: ghcr.io/zenopie/earth-network-chain@sha256:03c274793328ee4b1a4e38eab302a8b4040a7e27ce0fd35eaa21829331dd4377
     # `cloudflared` first: Akash's `command` maps to Kubernetes `command`, which
     # REPLACES the image entrypoint rather than appending to it. Without the
     # binary name the container tries to exec something called `tunnel` and the
     # service never starts — the lease reports available=0/1 with no other clue.
+    # PARKED too. The tunnel token is ONE credential and Cloudflare
+    # load-balances every connector presenting it, so a parked node whose
+    # connector is still up serves 502s for a share of real traffic.
     command:
-      - cloudflared
-      - tunnel
-      - --no-autoupdate
-      # Akash rejects a manifest with "zero global services", so something must
-      # be published. Publishing cloudflared's own metrics rather than the
-      # application keeps the chain and the service reachable only through the
-      # tunnel, and /ready gives a way to check connector health without the
-      # Cloudflare dashboard — which matters here because the Console API has no
-      # logs endpoint, and a connector that fails to start is otherwise silent.
-      - --metrics
-      - 0.0.0.0:2000
-      - run
+      - sh
+      - "-c"
+    args:
+      - "echo '[parked] cloudflared is deliberately NOT started. Deploy akash/deploy.yaml to undo.'; while true; do sleep 3600; done"
 
     expose:
       - port: 2000

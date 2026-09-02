@@ -4,3 +4,10 @@
 # private is not the same as "safe to commit a key to".
 .env*
 !.env.example
+
+# Personal Claude Code overrides. Holds the permission rule that lets the agent
+# run bin/lease-shell.py — a shell into the running validator — without a
+# prompt. Not committed: what one operator allows on their own machine is not a
+# property of this repository.
+.claude/settings.local.json
+__pycache__/

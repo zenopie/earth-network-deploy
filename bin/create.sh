@@ -38,19 +38,47 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API=https://console-api.akash.network/v1
 
-TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only]}"
+TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--no-statesync] [--var NAME]}"
 shift
 
-PROVIDER=""; DEPOSIT=5; ASSUME_YES=0; SDL_ONLY=0
+PROVIDER=""; DEPOSIT=5; ASSUME_YES=0; SDL_ONLY=0; SDL_FILE="akash/deploy.yaml"; FULLNODE=0
+NO_STATESYNC=0; DSEQ_VAR=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --provider) PROVIDER="${2:?--provider needs an address}"; shift 2 ;;
     --deposit)  DEPOSIT="${2:?--deposit needs a number}"; shift 2 ;;
     --yes)      ASSUME_YES=1; shift ;;
     --sdl-only) SDL_ONLY=1; shift ;;
+    --sdl)      SDL_FILE="${2:?--sdl needs a path}"; shift 2 ;;
+    --fullnode) FULLNODE=1; shift ;;
+    --no-statesync) NO_STATESYNC=1; shift ;;
+    --var)      DSEQ_VAR="${2:?--var needs a name}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# --fullnode creates a SECOND lease alongside the live one, for a node that
+# syncs rather than signs. Two things follow from that, both load bearing:
+#
+#   - build-sdl.py is told to strip every signing identity (see its --fullnode).
+#   - DSEQ in .env is NOT overwritten. It is the handle every other tool here
+#     uses -- deploy.sh, lease-logs.py, lease-shell.py -- and repointing it at
+#     the new node mid-migration would aim them all at the wrong lease while
+#     the live validator is the one that needs watching. The new number is
+#     written as SYNC_DSEQ instead.
+#
+# --var names the .env variable the new DSEQ is written to. It exists because
+# SYNC_DSEQ is no longer free: after the 2026-09-01 migration it points at the
+# LIVE VALIDATOR, so a third lease that defaulted to it would silently repoint
+# deploy.sh, lease-logs.py and lease-shell.py at the wrong node while the
+# validator is the one that needs watching.
+BUILD_ARGS=()
+if [ "$FULLNODE" = 1 ]; then
+  BUILD_ARGS+=(--fullnode)
+fi
+if [ "$NO_STATESYNC" = 1 ]; then
+  BUILD_ARGS+=(--no-statesync)
+fi
 
 [ -f "$HERE/.env" ] || { echo "no .env — it holds the secrets injected into the submitted SDL" >&2; exit 1; }
 set -a; . "$HERE/.env"; set +a
@@ -86,7 +114,8 @@ REDACT
 }
 
 DIGEST="$("$HERE/bin/digest.sh" "$TAG")"
-python3 "$HERE/bin/build-sdl.py" "$HERE" "$WORK/sdl.yaml" "$DIGEST"
+python3 "$HERE/bin/build-sdl.py" "$HERE" "$WORK/sdl.yaml" "$DIGEST" \
+  --sdl "$SDL_FILE" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
 
 if [ "$SDL_ONLY" = 1 ]; then
   echo "sdl built and validated; nothing submitted"
@@ -265,14 +294,26 @@ echo "leased $DSEQ_NEW on $CHOSEN"
 # deployment that no longer exists, and PUT against it fails in a way that reads
 # like an API problem rather than a wrong number.
 cp "$HERE/.env" "$HERE/.env.bak"
-python3 - "$HERE/.env" "$DSEQ_NEW" <<'PY'
+python3 - "$HERE/.env" "$DSEQ_NEW" "$FULLNODE" "$DSEQ_VAR" <<'PYEOF'
 import re, sys
-path, dseq = sys.argv[1], sys.argv[2]
+path, dseq, fullnode = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+explicit = sys.argv[4] if len(sys.argv) > 4 else ""
+# A sync node is an ADDITION, not a replacement: the live lease keeps DSEQ, so
+# every tool that reads it keeps watching the validator that still holds the
+# chain. Only the swap makes the new lease authoritative, and that is a
+# deliberate edit, never a side effect of creating a second lease.
+var = explicit or ("SYNC_DSEQ" if fullnode else "DSEQ")
 s = open(path).read()
-s2, n = re.subn(r"^DSEQ=.*$", "DSEQ=%s" % dseq, s, flags=re.M)
-open(path, "w").write(s2 if n else s.rstrip("\n") + "\nDSEQ=%s\n" % dseq)
-PY
-echo "DSEQ updated in .env (previous kept as .env.bak)"
+s2, n = re.subn(r"^%s=.*$" % var, "%s=%s" % (var, dseq), s, flags=re.M)
+open(path, "w").write(s2 if n else s.rstrip("\n") + "\n%s=%s\n" % (var, dseq))
+PYEOF
+if [ -n "$DSEQ_VAR" ]; then
+  echo "$DSEQ_VAR written to .env; DSEQ and SYNC_DSEQ left untouched"
+elif [ "$FULLNODE" = 1 ]; then
+  echo "SYNC_DSEQ written to .env; DSEQ still points at the live validator"
+else
+  echo "DSEQ updated in .env (previous kept as .env.bak)"
+fi
 
 cat <<EOF
 
