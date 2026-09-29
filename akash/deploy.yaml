@@ -421,6 +421,13 @@ profiles:
         # used. But storage is part of the bid too, so growing it later costs
         # another close-and-recreate — the one operation that destroys the
         # chain. Buying room once is much cheaper than needing it twice.
+        #
+        # data 20Gi -> 100Gi, 2026-09-29. 20Gi was not enough room: at the
+        # v0.9.2 plan height cosmovisor's pre-upgrade copy of data/ filled it,
+        # the node crash-looped, and a crash-looping pod cannot be replaced by
+        # an in-place PUT. earth-1 was relaunched from a new genesis. Keep the
+        # volume under half full, or set UNSAFE_SKIP_BACKUP=true before a plan
+        # height.
         cpu:
           units: 2
         memory:
@@ -430,7 +437,7 @@ profiles:
           # its libc++ runtime, plus the Python service and its dependencies.
           - size: 4Gi
           - name: data
-            size: 20Gi
+            size: 100Gi
             attributes:
               persistent: true
               # beta3, not beta2: of the providers online when this was written,

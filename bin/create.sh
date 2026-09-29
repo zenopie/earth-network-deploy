@@ -38,7 +38,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API=https://console-api.akash.network/v1
 
-TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--no-statesync] [--var NAME]}"
+TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--no-statesync] [--validator-key] [--tunnel] [--var NAME]}"
 shift
 
 PROVIDER=""; DEPOSIT=5; ASSUME_YES=0; SDL_ONLY=0; SDL_FILE="akash/deploy.yaml"; FULLNODE=0
@@ -52,6 +52,8 @@ while [ $# -gt 0 ]; do
     --sdl)      SDL_FILE="${2:?--sdl needs a path}"; shift 2 ;;
     --fullnode) FULLNODE=1; shift ;;
     --no-statesync) NO_STATESYNC=1; shift ;;
+    --validator-key) VALIDATOR_KEY=1; shift ;;
+    --tunnel)   TUNNEL=1; shift ;;
     --var)      DSEQ_VAR="${2:?--var needs a name}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -78,6 +80,16 @@ if [ "$FULLNODE" = 1 ]; then
 fi
 if [ "$NO_STATESYNC" = 1 ]; then
   BUILD_ARGS+=(--no-statesync)
+fi
+# --validator-key and --tunnel go straight through to build-sdl.py, as in
+# deploy.sh. A lease that has to sign from its first boot must be created with
+# them: adding them later is a PUT, and a pod that is not yet Ready (CometBFT
+# opens no listener before genesis_time) may never be replaced by one.
+if [ "${VALIDATOR_KEY:-0}" = 1 ]; then
+  BUILD_ARGS+=(--validator-key)
+fi
+if [ "${TUNNEL:-0}" = 1 ]; then
+  BUILD_ARGS+=(--tunnel)
 fi
 
 [ -f "$HERE/.env" ] || { echo "no .env — it holds the secrets injected into the submitted SDL" >&2; exit 1; }

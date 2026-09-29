@@ -441,7 +441,7 @@ profiles:
           # its libc++ runtime, plus the Python service and its dependencies.
           - size: 4Gi
           - name: data
-            size: 20Gi
+            size: 100Gi
             attributes:
               persistent: true
               # beta3, not beta2: of the providers online when this was written,
