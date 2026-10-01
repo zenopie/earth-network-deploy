@@ -96,17 +96,7 @@ the new genesis and crash-loop. A crash-looping pod cannot be replaced by a PUT.
 A new volume carries none of that. It is 200Gi because this node keeps full
 history (see "Disk" below).
 
-1. **Park the old lease first** (`akash/deploy-parked.yaml`, deployed to
-   `DSEQ`). Parking stops earthd and the old `cloudflared`, which shares
-   `TUNNEL_TOKEN`. Leaving the old connector up puts a second replica on
-   rpc/lcd.erth.network, and roughly half the requests go to the parked node.
-   Then move the old volume's key aside, so a later unpark cannot sign:
-
-       bin/lease-shell.py --service node --dseq <old> -- \
-         mv /data/config/priv_validator_key.json /data/config/priv_validator_key.json.REMOVED-see-env
-
-   `--fullnode` keeps keys out of the SDL. It does not remove a key already on
-   the volume. That produced a 69-block fork on 2026-09-01.
+1. **Nothing to park.** The old chain's last lease (`1790678074849`) was closed on 2026-10-01, so no old node or old `cloudflared` connector shares `TUNNEL_TOKEN`. Check this before creating the new lease: the Cloudflare dashboard should list **no** active connector on the tunnel. If you ever relaunch while an old lease is still up, park it first with `akash/deploy-parked.yaml`, after regenerating it from the current `deploy.yaml` (it is out of date). Also move its on-volume key aside, because `--fullnode` doesn't remove a key already on the volume (that caused the 69-block fork on 2026-09-01).
 2. **Dry run**, sending nothing:
 
        bin/create.sh <tag> --fullnode --no-statesync --validator-key --node-key \

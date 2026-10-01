@@ -1,3 +1,7 @@
+# OUT OF DATE (2026-10-01): written for the old chain (100Gi, no full-history
+# settings, no EARTHD_MEMPOOL_MAX_TXS). A parked SDL only works for an in-place
+# update when it matches the live lease, so regenerate it from the current
+# akash/deploy.yaml before using it. bin/build-sdl.py refuses it as it is.
 # Akash SDL — earth-1's validator, PARKED: everything identical, nothing running.
 #
 # ONE lease runs earth-1 as of 2026-09-01 (DSEQ in .env). It holds the whole
