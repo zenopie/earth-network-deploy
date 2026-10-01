@@ -13,42 +13,25 @@ step they gate.
 
 | # | Decision | Where it lands | Status |
 | --- | --- | --- | --- |
-| D1 | **Chain id**, or a new consensus key (see below) | chain `networks/genesis/chain.json`, `akash/deploy*.yaml` `CHAIN_ID`, `bin/build-sdl.py` `EXPECTED_CHAIN_ID`, backend `EARTH_CHAIN_ID`, both apps, web app, docs | **TODO**: genesis source still says `earth-1` |
+| D1 | **New consensus key**, chain id stays `earth-1` (decided 2026-10-01) | new `priv_validator_key.json` → regenerate the gentx in chain `networks/genesis/gentx/`; `.env` `PRIV_VALIDATOR_KEY_B64` | **TODO**: generate the key and gentx in the genesis ceremony |
 | D2 | **Genesis final**, its sha256 | `akash/genesis.sha256` (pin by hand), `bin/check-genesis.sh` | **TODO**: Phase 5 is finalising `networks/genesis.json` |
 | D3 | **genesis_time** | `networks/genesis/chain.json` | **TODO**: a real UTC instant after the apps are live in both stores |
 | D4 | **Launch tag** (`earthd` release) | image digest via `bin/digest.sh`, backend `EARTHD_VERSION`/`EARTHD_SHA256`, docs `join.md` | **TODO** |
 | D5 | **Lease sizing** | `akash/deploy.yaml` (validator 2 CPU / 4Gi / 100Gi), `akash/deploy-archive.yaml` (2 CPU / 4Gi / 200Gi), backend 4Gi state | **TODO**: confirm archive 200Gi |
 | D6 | Devnet accounts out of genesis (faucet `earth1s7rg…`, hot wallet) | chain `networks/genesis/accounts.json` | **TODO** (Phase 5) |
 
-### Chain id and consensus key: do not reuse both
+### Consensus key: generate a new one (decided 2026-10-01)
 
-`networks/genesis/gentx/genesis-validator.json` names consensus address
-`90603989D53D23401BB03C56C6728AE95A5AF8E1` with chain id `earth-1`. That is the
-same key and the same chain id that signed the 2026-08-28 chain and the chain
-that halted at 505000, and that signs the current chain.
+The chain id stays `earth-1`; the old chain was deleted (its last lease, `1790678074849`, was closed on 2026-10-01). The relaunch still needs a **new consensus key**:
+- The old key `90603989D53D23401BB03C56C6728AE95A5AF8E1` signed every earlier `earth-1` block, and those blocks were public.
+- An old signature at height *h*, paired with the new chain's signature at *h* from the same key under the same chain id, is valid double-sign evidence. That would tombstone the only validator.
+- With a new key, old signatures belong to a key the new chain has never seen.
 
-A CometBFT vote signature covers the chain id, the height, the round and the
-block id, and nothing that tells two chains with one chain id apart. So a
-precommit from an abandoned `earth-1` at height *h*, paired with the new chain's
-precommit at *h*, is valid `DuplicateVoteEvidence` on the new chain. Anyone who
-kept the old chain's commits (the RPC served them publicly for weeks) can post
-that pair to `/broadcast_evidence` while the new chain is near *h* (evidence
-expires only after 100,000 blocks **and** 48 hours). The single validator is
-then slashed and tombstoned, and a chain whose only validator is tombstoned
-stops for good.
-
-Fix one of the two for the relaunch, preferably both:
-
-- **A new chain id** (for example `earth-2`). Old signatures then verify on no
-  new chain. This costs a config change in every client (apps, web app, Keplr
-  entry, backend, relayer) and in the docs, all of which ship new builds for
-  this relaunch anyway.
-- **A new consensus key** for the genesis gentx. Put it in `.env` as
-  `PRIV_VALIDATOR_KEY_B64`, and keep the old one only in cold storage.
-
-The current chain has the same exposure today against the halted v0.9.2
-chain's heights, up to 505,000. That is an argument for doing the cutover soon,
-not for keeping the key.
+In the ceremony:
+1. `earthd init` on a clean home to get a fresh `priv_validator_key.json`.
+2. Regenerate the gentx with it.
+3. Put the key in `.env` as `PRIV_VALIDATOR_KEY_B64`.
+4. Destroy the old key. Don't keep it: it has no use and is only a liability.
 
 ## 1. Release gating
 
