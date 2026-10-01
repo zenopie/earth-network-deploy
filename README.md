@@ -9,7 +9,11 @@ genesis, Dockerfile, and the entrypoint that lets anyone run a node. Nothing
 here is needed to *join* the network; it is only needed to operate this
 particular deployment.
 
+    RELAUNCH.md             the privacy relaunch runbook (fresh genesis)
     akash/deploy.yaml       the deployed unit (node, cloudflared, relayer)
+    akash/deploy-archive.yaml  the keyless full-history node the indexer reads
+    akash/genesis.sha256    the relaunch genesis we mean to run (pinned by hand)
+    bin/check-genesis.sh    a release's / checkout's genesis vs that pin
     akash/README.md         how the lease behaves, and what destroys it
     akash/REMOTE_SIGNER.md  moving the consensus key behind tmkms
     bin/digest.sh           resolve a released tag to its image digest
