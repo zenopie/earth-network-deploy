@@ -11,7 +11,6 @@ particular deployment.
 
     RELAUNCH.md             the privacy relaunch runbook (fresh genesis)
     akash/deploy.yaml       the deployed unit (node, cloudflared, relayer)
-    akash/deploy-archive.yaml  the keyless full-history node the indexer reads
     akash/genesis.sha256    the relaunch genesis we mean to run (pinned by hand)
     bin/check-genesis.sh    a release's / checkout's genesis vs that pin
     akash/README.md         how the lease behaves, and what destroys it
@@ -30,6 +29,19 @@ In place keeps the volumes, so the chain keeps its height and history. Image and
 env changes can go this way; endpoint kinds and resources cannot, because they
 are part of what the provider bid on — those need a close-and-recreate, which
 **destroys the chain's state**.
+
+## One node
+
+earth-1 runs one node: the validator, which is also the full-history (archive)
+node behind rpc.erth.network and lcd.erth.network, and the RPC the privacy
+indexer reads `block_results` from. It never prunes and never state syncs, so
+its 200Gi data volume only grows. Akash cannot grow a volume in place: a bigger
+one is a new lease and a replay from block 1. Watch it, and alert well before
+half full:
+
+    bin/lease-shell.py --service node -- df -h /data
+
+See RELAUNCH.md, "Disk".
 
 ## Why the digest is resolved rather than committed
 

@@ -8,6 +8,14 @@
 # clients. Everything below about the 2026-09-01 lease history describes the
 # chain being replaced.
 #
+# ONE NODE. This lease is earth-1's validator AND its full-history (archive)
+# RPC node: rpc.erth.network and lcd.erth.network are served from it through
+# its tunnel, and the privacy indexer (earth-network-backend) reads
+# block_results from rpc.erth.network starting at height 1. So this node keeps
+# everything -- pruning=nothing, ABCI responses kept, txs indexed, never state
+# synced -- and its data volume only ever grows. See "full history" in the env
+# below and the data volume sizing in the compute profile.
+#
 # ONE lease runs earth-1 as of 2026-09-01 (DSEQ in .env). It holds the whole
 # chain — earliest_block_height 1 — because it was rebuilt from block 1 rather
 # than state synced, and it signs with the consensus key from .env.
@@ -24,8 +32,8 @@
 #   --validator-key  injects PRIV_VALIDATOR_KEY_B64. This is the one secret that
 #                    can double-sign.
 #   --tunnel         the real TUNNEL_TOKEN, so it serves rpc/lcd.
-#   --node-key       NODE_KEY_B64, so a new lease presents the node id the
-#                    archive node (akash/deploy-archive.yaml) was told to dial.
+#   --node-key       NODE_KEY_B64, so a new lease presents the node id joiners
+#                    were told to dial.
 #
 # CAUTION, learned on 2026-09-01: --fullnode only keeps keys out of the SDL. It
 # does NOT remove a priv_validator_key.json already on a volume. A former
@@ -58,8 +66,8 @@ services:
       # TODO(relaunch): confirm the chain id. The relaunch genesis source
       # (chain repo networks/genesis/chain.json on privacy/main) still says
       # earth-1; if Phase 5 picks a new id, change it here, in
-      # akash/deploy-archive.yaml, in bin/build-sdl.py (EXPECTED_CHAIN_ID), and
-      # in the backend's EARTH_CHAIN_ID.
+      # bin/build-sdl.py (EXPECTED_CHAIN_ID), and in the backend's
+      # EARTH_CHAIN_ID.
       - CHAIN_ID=earth-1
       - MONIKER=earth-akash-validator
       # Free transactions mean free spam. Per-node config, not a chain parameter,
@@ -200,15 +208,43 @@ services:
       #   DAEMON_DOWNLOAD_MUST_HAVE_CHECKSUM=true
       #     never turn this off. With downloads on, the checksum is the only
       #     thing tying what runs to what governance approved.
-      #   UNSAFE_SKIP_BACKUP=false
-      #     cosmovisor copies data/ before upgrading, so it needs the volume to
-      #     hold two copies of chain state at once. It is the only rollback that
-      #     exists if an upgrade handler corrupts state. Watch the volume size
-      #     as history grows rather than turning this off first.
       #
       # After an upgrade, the running binary is the downloaded one, not the one
       # in the pinned digest above. `earthd version` and the image digest will
       # disagree until the digest is bumped to match -- that is expected.
+      #
+      # Skip cosmovisor's pre-upgrade backup. The backup copies all of data/,
+      # so it needs the volume to hold two copies of chain state at once. That
+      # copy is what filled the old 20Gi volume at the v0.9.2 plan height: the
+      # node crash-looped, a crash-looping pod cannot be replaced by an in-place
+      # PUT, and the chain had to be relaunched from a new genesis. On a
+      # full-history node data/ only grows, so the backup would eventually do it
+      # again. The rollback it offered (an upgrade handler that corrupts state)
+      # is instead: halt, export, fix by governance.
+      - UNSAFE_SKIP_BACKUP=true
+      #
+      # ---- full history ----------------------------------------------------
+      #
+      # This node is also the archive node. The privacy indexer downloads every
+      # block's results from height 1 through rpc.erth.network; a missing
+      # height is a hole wallets cannot scan past, and nothing refills it on
+      # this volume. bin/build-sdl.py refuses an SDL without all of these.
+      #
+      # Read by earthd itself from EARTHD_-prefixed env, which overrides
+      # app.toml and config.toml (both on the volume; the entrypoint writes
+      # none of these sections).
+      #
+      # app.toml: keep every state version, so a query at any height answers.
+      - EARTHD_PRUNING=nothing
+      # app.toml: never prune a block. 0 is the default; pinned.
+      - EARTHD_MIN_RETAIN_BLOCKS=0
+      # config.toml [storage]: keep FinalizeBlock responses. The indexer's whole
+      # input is /block_results; with this true they are dropped once applied.
+      - EARTHD_STORAGE_DISCARD_ABCI_RESPONSES=false
+      # config.toml [tx_index]: index txs, so /tx and /tx_search answer.
+      - EARTHD_TX_INDEX_INDEXER=kv
+      # Never state sync (no STATESYNC_* here; see "peers" above): state sync
+      # floors a node at its trust height and CometBFT never backfills below it.
       #
       # ---- browser access -------------------------------------------------
       #
@@ -482,7 +518,16 @@ profiles:
         # the node crash-looped, and a crash-looping pod cannot be replaced by
         # an in-place PUT. earth-1 was relaunched from a new genesis. Keep the
         # volume under half full, or set UNSAFE_SKIP_BACKUP=true before a plan
-        # height.
+        # height. (It is now set: see the env above.)
+        #
+        # data 100Gi -> 200Gi, privacy relaunch. This node is now the archive
+        # node too: pruning=nothing and block results are kept for ever, so the
+        # volume only grows. Each private tx carries ~15 KB of proof per proof
+        # (14.6 KB measured), stored in the block and again in its results. And
+        # Akash cannot grow a volume in place: a bigger one is a new lease, i.e.
+        # a full replay onto it and a validator migration. So buy the room up
+        # front, and re-check the growth rate in month one. Alert well before
+        # half full (RELAUNCH.md, "Disk").
         cpu:
           units: 2
         memory:
@@ -492,7 +537,7 @@ profiles:
           # its libc++ runtime, plus the Python service and its dependencies.
           - size: 4Gi
           - name: data
-            size: 100Gi
+            size: 200Gi
             attributes:
               persistent: true
               # beta3, not beta2: of the providers online when this was written,
@@ -526,9 +571,10 @@ profiles:
         # Bid ceilings, not the price paid.
         # Raised with the profile: a ceiling that fitted 0.5 cpu / 1Gi would
         # draw no bids at 2 cpu / 4Gi / 20Gi. Still a ceiling, not the price.
+        # 40000 -> 50000 with the 200Gi volume.
         node:
           denom: uakt
-          amount: 40000
+          amount: 50000
         relayer:
           denom: uakt
           amount: 10000

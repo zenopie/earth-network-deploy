@@ -12,7 +12,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TAG="${1:?usage: deploy.sh <tag> [--print] [--sdl <path>] [--dseq <n>] [--fullnode] [--validator-key] [--node-key] [--tunnel] [--tunnel-var NAME] [--no-statesync]}"
+TAG="${1:?usage: deploy.sh <tag> [--print] [--sdl <path>] [--dseq <n>] [--fullnode] [--validator-key] [--node-key] [--tunnel] [--no-statesync]}"
 shift
 
 # There are two leases during the sync migration, and PUTting the wrong SDL at
@@ -31,7 +31,6 @@ while [ $# -gt 0 ]; do
     --no-statesync)   BUILD_ARGS+=(--no-statesync); shift ;;
     --tunnel)         BUILD_ARGS+=(--tunnel); shift ;;
     --node-key)       BUILD_ARGS+=(--node-key); shift ;;
-    --tunnel-var)     BUILD_ARGS+=(--tunnel-var "${2:?--tunnel-var needs a name}"); shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

@@ -38,7 +38,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API=https://console-api.akash.network/v1
 
-TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--tunnel-var NAME] [--var NAME]}"
+TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--var NAME]}"
 shift
 
 PROVIDER=""; DEPOSIT=5; ASSUME_YES=0; SDL_ONLY=0; SDL_FILE="akash/deploy.yaml"; FULLNODE=0
@@ -55,7 +55,6 @@ while [ $# -gt 0 ]; do
     --validator-key) VALIDATOR_KEY=1; shift ;;
     --tunnel)   TUNNEL=1; shift ;;
     --node-key) NODE_KEY=1; shift ;;
-    --tunnel-var) TUNNEL_VAR="${2:?--tunnel-var needs a name}"; shift 2 ;;
     --var)      DSEQ_VAR="${2:?--var needs a name}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -94,14 +93,10 @@ if [ "${TUNNEL:-0}" = 1 ]; then
   BUILD_ARGS+=(--tunnel)
 fi
 # --node-key: the validator's fixed p2p id on a NEW lease (privacy relaunch), so
-# the archive node and joiners can be told whom to dial before launch.
-# --tunnel-var: which .env token --tunnel injects (ARCHIVE_TUNNEL_TOKEN for the
-# archive node). Both go straight through to build-sdl.py.
+# joiners can be told whom to dial before launch. Straight through to
+# build-sdl.py.
 if [ "${NODE_KEY:-0}" = 1 ]; then
   BUILD_ARGS+=(--node-key)
-fi
-if [ -n "${TUNNEL_VAR:-}" ]; then
-  BUILD_ARGS+=(--tunnel-var "$TUNNEL_VAR")
 fi
 
 [ -f "$HERE/.env" ] || { echo "no .env — it holds the secrets injected into the submitted SDL" >&2; exit 1; }

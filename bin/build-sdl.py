@@ -34,15 +34,10 @@ ap.add_argument("--no-statesync", action="store_true",
                      "every no-consensus-key guarantee still applies.")
 ap.add_argument("--node-key", action="store_true",
                 help="with --fullnode --validator-key: also inject NODE_KEY_B64, so "
-                     "a validator on a NEW lease has the p2p id the archive node "
-                     "and joiners were told to dial, from its first boot. Only "
+                     "a validator on a NEW lease has the p2p id joiners were told "
+                     "to dial, from its first boot. Only "
                      "with --validator-key: a second node carrying the same node "
                      "key is two peers claiming one id.")
-ap.add_argument("--tunnel-var", default="TUNNEL_TOKEN",
-                help="the .env variable --tunnel injects. TUNNEL_TOKEN is the "
-                     "validator's tunnel (rpc/lcd.erth.network); the archive node "
-                     "has its own (ARCHIVE_TUNNEL_TOKEN), because every connector "
-                     "holding one token is load-balanced the same hostnames.")
 ap.add_argument("--fullnode", action="store_true",
                 help="build a node with NO consensus key: no validator mnemonic, "
                      "no PRIV_VALIDATOR_KEY_B64, no NODE_KEY_B64, and a tunnel "
@@ -51,7 +46,7 @@ ap.add_argument("--fullnode", action="store_true",
 args = ap.parse_args()
 repo, out, digest, fullnode = args.repo, args.out, args.digest, args.fullnode
 want_valkey, want_tunnel = args.validator_key, args.tunnel
-want_nodekey, tunnel_var = args.node_key, args.tunnel_var
+want_nodekey = args.node_key
 assert not want_nodekey or (fullnode and want_valkey), \
     "--node-key only applies with --fullnode --validator-key"
 
@@ -148,7 +143,7 @@ anchor = "    env: []\n"
 assert s.count(anchor) == 1, "cloudflared env anchor moved"
 use_placeholder = fullnode and not want_tunnel
 s = s.replace(anchor, "    env:\n      - TUNNEL_TOKEN=%s\n"
-              % (TUNNEL_PLACEHOLDER if use_placeholder else env[tunnel_var]))
+              % (TUNNEL_PLACEHOLDER if use_placeholder else env["TUNNEL_TOKEN"]))
 
 # relayer: its key, only when the service is actually on. Injected the same way
 # and for the same reason as the other two — it reaches the provider either way,
@@ -168,8 +163,7 @@ open(out, "w").write(s)
 d = yaml.safe_load(s)
 assert d["version"] == "2.0", f'version became {d["version"]!r}'
 svcs = d["services"]
-# The validator SDL runs node + relayer + tunnel; the archive SDL has no relayer.
-assert set(svcs) in ({"node", "relayer", "cloudflared"}, {"node", "cloudflared"}), sorted(svcs)
+assert set(svcs) == {"node", "relayer", "cloudflared"}, sorted(svcs)
 
 def envmap(name):
     if name not in svcs:
@@ -235,8 +229,8 @@ if fullnode:
             "early blocks that are the whole point of replaying.")
     # Present, but allowed to be empty. A node that has to reach the network
     # needs peers, and forgetting them is the mistake this catches. But
-    # earth-1 currently runs ONE node: the archive and sync leases were closed
-    # on 2026-09-01, so there is nobody to dial, and naming a dead peer only
+    # earth-1 runs ONE node -- the validator, which is also the full-history
+    # RPC node behind rpc/lcd.erth.network -- so there is nobody to dial, and naming a dead peer only
     # produces a reconnect error every few seconds. An explicitly empty value
     # says "deliberately alone"; a missing key still says "you forgot".
     assert "PERSISTENT_PEERS" in n, (
@@ -274,21 +268,21 @@ assert n.get("EARTHD_MEMPOOL_MAX_TXS") == "-1", (
 assert "uanml" not in n.get("MIN_GAS_PRICES", ""), \
     "ANML is shielded-only and refused as a fee; MIN_GAS_PRICES is uerth only"
 
-# The archive / indexer node. Its whole job is every block and every block's
-# results from height 1, which the privacy indexer downloads in full ranges;
-# a gap is an index wallets cannot use.
-if n.get("NODE_ROLE") == "archive":
-    assert fullnode and not want_valkey and not want_nodekey, \
-        "the archive node never holds a consensus or node key: build it --fullnode only"
-    assert no_statesync, "the archive node replays from genesis: pass --no-statesync"
-    for k, want in (("EARTHD_PRUNING", "nothing"),
-                    ("EARTHD_MIN_RETAIN_BLOCKS", "0"),
-                    ("EARTHD_STORAGE_DISCARD_ABCI_RESPONSES", "false"),
-                    ("EARTHD_TX_INDEX_INDEXER", "kv")):
-        assert n.get(k) == want, f"archive node needs {k}={want}, has {n.get(k)!r}"
-    assert not (want_tunnel and tunnel_var == "TUNNEL_TOKEN"), (
-        "--tunnel on the archive with the VALIDATOR's tunnel token puts a second "
-        "connector on rpc/lcd.erth.network; pass --tunnel-var ARCHIVE_TUNNEL_TOKEN")
+# The one node is also the full-history node the privacy indexer reads. Its
+# job includes every block and every block's results from height 1, which the
+# indexer downloads in full ranges through rpc.erth.network; a gap is an index
+# wallets cannot use, and it can never be refilled on this volume.
+for k, want in (("EARTHD_PRUNING", "nothing"),
+                ("EARTHD_MIN_RETAIN_BLOCKS", "0"),
+                ("EARTHD_STORAGE_DISCARD_ABCI_RESPONSES", "false"),
+                ("EARTHD_TX_INDEX_INDEXER", "kv"),
+                # The data volume grows without bound; cosmovisor's pre-upgrade
+                # copy of data/ is what filled the last chain's disk and halted it.
+                ("UNSAFE_SKIP_BACKUP", "true")):
+    assert n.get(k) == want, f"the full-history node needs {k}={want}, has {n.get(k)!r}"
+assert not n.get("STATESYNC_RPC_SERVERS"), (
+    "STATESYNC_RPC_SERVERS set: state sync floors the node at its trust height "
+    "and the indexer would have a permanent hole below it")
 mn = n.get("VALIDATOR_MNEMONIC", "")
 if not fullnode:
     assert len(mn.split()) in (12, 24), "validator mnemonic missing/malformed"
@@ -316,11 +310,12 @@ print("services:   ", ", ".join(sorted(svcs)))
 print("node image: ", img)
 print("DEV_INIT:   ", n["DEV_INIT"], " CHAIN_ID:", n["CHAIN_ID"], " MIN_GAS:", n.get("MIN_GAS_PRICES"),
       " mempool.max-txs:", n.get("EARTHD_MEMPOOL_MAX_TXS"))
-if n.get("NODE_ROLE"):
-    print("role:        ", n["NODE_ROLE"])
+print("history:      pruning=%s discard_abci_responses=%s tx_index=%s skip_backup=%s" % (
+      n["EARTHD_PRUNING"], n["EARTHD_STORAGE_DISCARD_ABCI_RESPONSES"],
+      n["EARTHD_TX_INDEX_INDEXER"], n["UNSAFE_SKIP_BACKUP"]))
 if n.get("NODE_KEY_B64"):
     # node id = hex of the first 20 bytes of sha256(ed25519 pubkey); the pubkey
-    # is the last 32 bytes of priv_key.value. Printed so the id archive and
+    # is the last 32 bytes of priv_key.value. Printed so the id
     # joiners dial can be checked against what this lease will present.
     nk = json.loads(base64.b64decode(n["NODE_KEY_B64"]))
     pub = base64.b64decode(nk["priv_key"]["value"])[32:]
@@ -353,6 +348,4 @@ if r:
           if r["ENABLED"] == "true" else ""))
 else:
     print("relayer:     (none in this SDL)")
-if fullnode and want_tunnel:
-    print("tunnel:      %s" % tunnel_var)
 print("wrote", out, "(%d bytes)" % len(s))

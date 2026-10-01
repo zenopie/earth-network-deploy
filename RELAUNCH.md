@@ -9,6 +9,11 @@ This is the order of operations, the checks at each step, and what to do when a
 step fails. Items marked **TODO** need a decision from the operator before the
 step they gate.
 
+**One node.** The validator is also the full-history (archive) node: it serves
+rpc.erth.network and lcd.erth.network through its tunnel, and the privacy
+indexer reads `block_results` from it from height 1. There is no separate
+archive lease.
+
 ## 0. Decisions that gate everything
 
 | # | Decision | Where it lands | Status |
@@ -17,7 +22,7 @@ step they gate.
 | D2 | **Genesis final**, its sha256 | `akash/genesis.sha256` (pin by hand), `bin/check-genesis.sh` | **TODO**: Phase 5 is finalising `networks/genesis.json` |
 | D3 | **genesis_time** | `networks/genesis/chain.json` | **TODO**: a real UTC instant after the apps are live in both stores |
 | D4 | **Launch tag** (`earthd` release) | image digest via `bin/digest.sh`, backend `EARTHD_VERSION`/`EARTHD_SHA256`, docs `join.md` | **TODO** |
-| D5 | **Lease sizing** | `akash/deploy.yaml` (validator 2 CPU / 4Gi / 100Gi), `akash/deploy-archive.yaml` (2 CPU / 4Gi / 200Gi), backend 4Gi state | **TODO**: confirm archive 200Gi |
+| D5 | **Lease sizing** | `akash/deploy.yaml` (validator + full history: 2 CPU / 4Gi / 200Gi), backend 4Gi state | 200Gi chosen 2026-10-01; re-check growth in month one |
 | D6 | Devnet accounts out of genesis (faucet `earth1s7rg…`, hot wallet) | chain `networks/genesis/accounts.json` | **TODO** (Phase 5) |
 
 ### Consensus key: generate a new one (decided 2026-10-01)
@@ -88,8 +93,8 @@ keep the p2p port, but it deletes only `config/` and `data/`. A
 `cosmovisor/current` or `upgrades/` left on the volume by the old chain
 outranks the image's genesis binary, so the node would start the old binary on
 the new genesis and crash-loop. A crash-looping pod cannot be replaced by a PUT.
-A new volume carries none of that, and 100Gi is the size already chosen after
-the disk-full halt.
+A new volume carries none of that. It is 200Gi because this node keeps full
+history (see "Disk" below).
 
 1. **Park the old lease first** (`akash/deploy-parked.yaml`, deployed to
    `DSEQ`). Parking stops earthd and the old `cloudflared`, which shares
@@ -108,8 +113,11 @@ the disk-full halt.
          --tunnel --sdl-only
 
    Read the summary: chain id, `mempool.max-txs: -1`, `node id` (from
-   `NODE_KEY_B64`; this is the id the archive node and joiners dial), consensus
-   address, `TUNNEL_TOKEN`.
+   `NODE_KEY_B64`; this is the id joiners dial), consensus address,
+   `TUNNEL_TOKEN`, and the `history:` line (`pruning=nothing
+   discard_abci_responses=false tx_index=kv skip_backup=true`). `build-sdl.py`
+   refuses an SDL that prunes, drops block results, state syncs or keeps the
+   cosmovisor backup.
 3. **Create**, on an ADX provider. `earthd` dies with `Illegal instruction` on
    a host without ADX. The current chain's EPYC provider
    `akash15tl6v6gd0nte0syyxnv57zmmspgju4c3xfmdhk` has it.
@@ -127,47 +135,40 @@ the disk-full halt.
    - `node id fixed from NODE_KEY_B64: <id from step 2>`;
    - `starting under cosmovisor`, with the image as the genesis binary;
    - no `REQUIRE_NO_CONSENSUS_KEY` refusal (the validator does not set it);
-   - the 26656 host:port from the lease status. Record it for section 4.
+   - the 26656 host:port from the lease status. Record it for step 5 and for
+     the docs' node address.
 5. After launch, set `EXTERNAL_ADDRESS` to that host:port with an in-place PUT.
    Repoint `DSEQ` in `.env` at the new lease.
 6. **Close the old lease** only once the new chain has run cleanly for a few
    days. Closing destroys the old chain's state, which is the only rollback
-   (section 8).
-
-Disk: keep the volume **under half full before any upgrade height**, or set
-`UNSAFE_SKIP_BACKUP=true` for that upgrade. Cosmovisor's pre-upgrade backup of
-`data/` is what filled 20Gi and ended the v0.9.2 chain. Volumes cannot grow in
-place.
-
-## 4. Archive / full-history RPC (for the indexer)
-
-`akash/deploy-archive.yaml`: keyless, never state-synced, `pruning=nothing`,
-`min-retain-blocks=0`, `discard_abci_responses=false`, `tx_index=kv`, the
-no-op mempool, cosmovisor with the backup skipped, 200Gi (D5). `build-sdl.py`
-refuses it with any key, with state sync, with pruning, or on the validator's
-tunnel.
-
-1. Fill `PERSISTENT_PEERS` with `<node id from 3.2>@<host:port from 3.4>`.
-   `build-sdl.py` refuses an unfilled `<placeholder>`.
-2. Create it around `genesis_time`, on an ADX provider:
-
-       bin/create.sh <tag> --sdl akash/deploy-archive.yaml --fullnode --no-statesync \
-         --provider <ADX provider> --var ARCHIVE_DSEQ
-
-   It runs `REQUIRE_NO_CONSENSUS_KEY=1`, so it refuses to start if a consensus
-   key ever appears on the volume.
-3. Once `catching_up: false`, attach its own tunnel:
-
-       bin/deploy.sh <tag> --sdl akash/deploy-archive.yaml --dseq $ARCHIVE_DSEQ \
-         --fullnode --no-statesync --tunnel --tunnel-var ARCHIVE_TUNNEL_TOKEN
-
-   On Cloudflare, map `archive-rpc.erth.network` to `http://node:26657`.
-4. Checks:
-   - `/status` shows `earliest_block_height: 1`;
+   (section 7).
+7. **Full-history checks**, after the first blocks:
+   - `rpc.erth.network/status` shows `earliest_block_height: 1`;
    - `/block_results?height=1` answers;
    - `/tx?hash=…` answers for a known tx.
 
-## 5. Backend and indexer
+### Disk
+
+The validator keeps everything: `pruning=nothing`, every block and every
+block's results, for ever. Its data volume only grows, and **Akash cannot grow
+a volume in place.** A bigger disk means a new lease, a replay from block 1
+onto it (no state sync: that would floor the indexer's history), and a
+validator migration (the four checks in section 7). Start that well before it
+is urgent.
+
+- **Check usage** weekly, and after any burst of registrations:
+
+      bin/lease-shell.py --service node -- df -h /data
+      bin/lease-shell.py --service node -- du -sh /data/data /data/cosmovisor
+
+- **Alert well before half full** (say 40%, about 80Gi of 200Gi). Half is the
+  point where a replacement lease must already be syncing, not being planned.
+  Re-measure the growth rate in the first month and turn it into a date.
+- `UNSAFE_SKIP_BACKUP=true` is set, so an upgrade height no longer needs room
+  for a second copy of `data/`. Cosmovisor's pre-upgrade backup is what filled
+  20Gi and ended the v0.9.2 chain.
+
+## 4. Backend and indexer
 
 The backend SDL (earth-network-backend, `deploy/akash/deploy.yaml`) now asks for
 a **4Gi** state volume for the privacy index. Akash cannot grow a volume in
@@ -179,29 +180,27 @@ ids for the old chain) has no value on the new chain.
    (section 1.3).
 2. SDL env:
    - `EARTH_CHAIN_ID` = D1.
-   - `INDEXER_RPC_URL=https://archive-rpc.erth.network:443`. **TODO** in the
-     backend repo: it currently reads `rpc.erth.network`, the validator. That
-     works, because default pruning keeps every block and its results, but it
-     puts the indexer's full-range reads on the block producer.
+   - `INDEXER_RPC_URL=https://rpc.erth.network:443` (the default): CometBFT
+     RPC on the validator, the only node, which keeps every block's results.
    - `INDEXER_START_HEIGHT=0` and a fresh `INDEX_DB`. The indexer refuses a
      different chain id or block hash behind its RPC.
 3. Fund the gas hot wallet with **transparent** ERTH after launch. It shields
    dust to each `pc_gas`. Fund it from the validator's account with a key that
    has never been on a laptop, not from a devnet genesis balance.
 4. Cut `api.erth.network` over: park the old backend's `cloudflared` before the
-   new one connects (the same one-token rule as section 3.1), or give the new
+   new one connects (one token, one live connector, as in section 3.1), or give the new
    lease a new token.
 5. Checks:
    - `/privacy/status` follows the chain height with no halt reason;
    - `bin/verify-trees.py --db …` exits 0;
    - `/gas/register` pays a real registration from a store build.
 
-## 6. Launch day
+## 5. Launch day
 
 At `genesis_time`:
 
 1. Blocks are produced: `rpc.erth.network/status` height rises.
-2. The archive node and the indexer follow.
+2. The indexer follows (`/privacy/status`).
 3. Smoke tests, each from a store build of the app. **Read the execution result
    with `query tx <hash>`.** Code 0 from a broadcast only means the tx entered
    the mempool. A private tx has no `message.sender`, so search by hash:
@@ -215,9 +214,10 @@ At `genesis_time`:
    - an assembly vote and a stake vote on a test proposal. Both houses must pass.
 4. Publish the docs branch, after filling its placeholders.
 
-## 7. After launch
+## 6. After launch
 
-- `EXTERNAL_ADDRESS` on the validator (section 3.5) and on the archive node.
+- `EXTERNAL_ADDRESS` on the validator (section 3.5).
+- Disk usage on the validator, on a schedule (section 3, "Disk").
 - The IBC relayer: `akash/deploy.yaml` has the old path's ids commented out.
   Link anew with `LINK_ON_START=true` for one deploy, pin the new ids, and fund
   the relayer key with transparent ERTH.
@@ -225,7 +225,7 @@ At `genesis_time`:
 - Bump cosmovisor when a release contains cosmos-sdk #23720. Until then its
   upgrade detection can lose a race on a small node.
 
-## 8. Rollback
+## 7. Rollback
 
 - **Before `genesis_time`**, nothing is irreversible except closing the old
   lease. To abort: close the new lease, put the key back on the old volume
