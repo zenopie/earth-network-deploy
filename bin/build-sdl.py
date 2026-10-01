@@ -8,6 +8,7 @@ risk turning version: "2.0" into a float, which the SDL parser rejects.
 """
 import argparse
 import base64
+import hashlib
 import json
 import os, re, sys, yaml
 
@@ -31,6 +32,17 @@ ap.add_argument("--no-statesync", action="store_true",
                      "from block 1 with the binaries driven by hand across the "
                      "upgrade heights. Relaxes only the state-sync assertion; "
                      "every no-consensus-key guarantee still applies.")
+ap.add_argument("--node-key", action="store_true",
+                help="with --fullnode --validator-key: also inject NODE_KEY_B64, so "
+                     "a validator on a NEW lease has the p2p id the archive node "
+                     "and joiners were told to dial, from its first boot. Only "
+                     "with --validator-key: a second node carrying the same node "
+                     "key is two peers claiming one id.")
+ap.add_argument("--tunnel-var", default="TUNNEL_TOKEN",
+                help="the .env variable --tunnel injects. TUNNEL_TOKEN is the "
+                     "validator's tunnel (rpc/lcd.erth.network); the archive node "
+                     "has its own (ARCHIVE_TUNNEL_TOKEN), because every connector "
+                     "holding one token is load-balanced the same hostnames.")
 ap.add_argument("--fullnode", action="store_true",
                 help="build a node with NO consensus key: no validator mnemonic, "
                      "no PRIV_VALIDATOR_KEY_B64, no NODE_KEY_B64, and a tunnel "
@@ -39,6 +51,15 @@ ap.add_argument("--fullnode", action="store_true",
 args = ap.parse_args()
 repo, out, digest, fullnode = args.repo, args.out, args.digest, args.fullnode
 want_valkey, want_tunnel = args.validator_key, args.tunnel
+want_nodekey, tunnel_var = args.node_key, args.tunnel_var
+assert not want_nodekey or (fullnode and want_valkey), \
+    "--node-key only applies with --fullnode --validator-key"
+
+# The chain id every SDL here must carry.
+# TODO(relaunch): earth-1 is what the relaunch genesis source says today
+# (chain repo networks/genesis/chain.json). See RELAUNCH.md, "Chain id and
+# consensus key", for why a new id (or a new consensus key) is recommended.
+EXPECTED_CHAIN_ID = "earth-1"
 no_statesync = args.no_statesync
 assert not no_statesync or fullnode, \
     "--no-statesync only applies on top of --fullnode"
@@ -117,13 +138,17 @@ if fullnode and want_valkey:
     assert env.get("PRIV_VALIDATOR_KEY_B64"), "no PRIV_VALIDATOR_KEY_B64 in .env to promote with"
     s = s.replace(key_anchor,
                   key_anchor + f"      - PRIV_VALIDATOR_KEY_B64={env['PRIV_VALIDATOR_KEY_B64']}\n")
+    if want_nodekey:
+        assert env.get("NODE_KEY_B64"), "no NODE_KEY_B64 in .env for --node-key"
+        s = s.replace(key_anchor,
+                      key_anchor + f"      - NODE_KEY_B64={env['NODE_KEY_B64']}\n")
 
 # cloudflared: the tunnel token replaces the empty env list
 anchor = "    env: []\n"
 assert s.count(anchor) == 1, "cloudflared env anchor moved"
 use_placeholder = fullnode and not want_tunnel
 s = s.replace(anchor, "    env:\n      - TUNNEL_TOKEN=%s\n"
-              % (TUNNEL_PLACEHOLDER if use_placeholder else env["TUNNEL_TOKEN"]))
+              % (TUNNEL_PLACEHOLDER if use_placeholder else env[tunnel_var]))
 
 # relayer: its key, only when the service is actually on. Injected the same way
 # and for the same reason as the other two — it reaches the provider either way,
@@ -143,9 +168,12 @@ open(out, "w").write(s)
 d = yaml.safe_load(s)
 assert d["version"] == "2.0", f'version became {d["version"]!r}'
 svcs = d["services"]
-assert set(svcs) == {"node", "relayer", "cloudflared"}, sorted(svcs)
+# The validator SDL runs node + relayer + tunnel; the archive SDL has no relayer.
+assert set(svcs) in ({"node", "relayer", "cloudflared"}, {"node", "cloudflared"}), sorted(svcs)
 
 def envmap(name):
+    if name not in svcs:
+        return {}
     return dict(e.split("=", 1) for e in (svcs[name].get("env") or []))
 
 n, c, r = envmap("node"), envmap("cloudflared"), envmap("relayer")
@@ -160,7 +188,7 @@ if fullnode:
     # node that came up holding the live validator's consensus key would sign at
     # heights the first node is also signing: equivocation, on a chain where one
     # validator holds all the voting power.
-    for var in ("VALIDATOR_MNEMONIC", "NODE_KEY_B64"):
+    for var in ("VALIDATOR_MNEMONIC",) + (() if want_nodekey else ("NODE_KEY_B64",)):
         assert var not in n, (
             f"--fullnode built an SDL carrying {var}. This node must hold no "
             "signing identity; refusing to submit one that does.")
@@ -230,7 +258,37 @@ else:
         raise AssertionError("PRIV_VALIDATOR_KEY_B64 is not base64 of JSON: %s" % e)
     assert "priv_key" in k and "address" in k, "PRIV_VALIDATOR_KEY_B64 is not a priv_validator_key.json"
 
-assert n.get("CHAIN_ID") == "earth-1"
+# An SDL with a <placeholder> left in it would boot a node that dials, or
+# advertises, nothing real. Fill it in or comment the line out.
+for svc in svcs:
+    for k, v in envmap(svc).items():
+        assert not ("<" in v and ">" in v), f"{svc}: {k}={v} is an unfilled placeholder"
+
+assert n.get("CHAIN_ID") == EXPECTED_CHAIN_ID, (n.get("CHAIN_ID"), EXPECTED_CHAIN_ID)
+
+# Private (unsigned) txs need the SDK's no-op app mempool; any max-txs >= 0
+# rejects them in CheckTx. Every node on this chain, every SDL.
+assert n.get("EARTHD_MEMPOOL_MAX_TXS") == "-1", (
+    "EARTHD_MEMPOOL_MAX_TXS must be -1: the priority and sender-nonce mempools "
+    "reject zero-signer txs, i.e. every claim, vote and private transfer")
+assert "uanml" not in n.get("MIN_GAS_PRICES", ""), \
+    "ANML is shielded-only and refused as a fee; MIN_GAS_PRICES is uerth only"
+
+# The archive / indexer node. Its whole job is every block and every block's
+# results from height 1, which the privacy indexer downloads in full ranges;
+# a gap is an index wallets cannot use.
+if n.get("NODE_ROLE") == "archive":
+    assert fullnode and not want_valkey and not want_nodekey, \
+        "the archive node never holds a consensus or node key: build it --fullnode only"
+    assert no_statesync, "the archive node replays from genesis: pass --no-statesync"
+    for k, want in (("EARTHD_PRUNING", "nothing"),
+                    ("EARTHD_MIN_RETAIN_BLOCKS", "0"),
+                    ("EARTHD_STORAGE_DISCARD_ABCI_RESPONSES", "false"),
+                    ("EARTHD_TX_INDEX_INDEXER", "kv")):
+        assert n.get(k) == want, f"archive node needs {k}={want}, has {n.get(k)!r}"
+    assert not (want_tunnel and tunnel_var == "TUNNEL_TOKEN"), (
+        "--tunnel on the archive with the VALIDATOR's tunnel token puts a second "
+        "connector on rpc/lcd.erth.network; pass --tunnel-var ARCHIVE_TUNNEL_TOKEN")
 mn = n.get("VALIDATOR_MNEMONIC", "")
 if not fullnode:
     assert len(mn.split()) in (12, 24), "validator mnemonic missing/malformed"
@@ -244,7 +302,7 @@ else:
         assert c.get("TUNNEL_TOKEN") == TUNNEL_PLACEHOLDER, (
             "--fullnode must not carry the live tunnel token: a second replica on "
             "that tunnel splits real traffic onto a node that is still syncing")
-if r.get("ENABLED") == "true":
+if r and r.get("ENABLED") == "true":
     rm = r.get("RELAYER_MNEMONIC", "")
     assert len(rm.split()) in (12, 24), "relayer enabled but its mnemonic is missing/malformed"
     assert not any(c in rm for c in "\"'"), "relayer mnemonic carries quote characters"
@@ -252,10 +310,21 @@ if r.get("ENABLED") == "true":
         assert r.get(k), f"relayer enabled but {k} is unset"
 
 img = svcs["node"]["image"]
-assert img == svcs["relayer"]["image"], "node and relayer images differ"
+if "relayer" in svcs:
+    assert img == svcs["relayer"]["image"], "node and relayer images differ"
 print("services:   ", ", ".join(sorted(svcs)))
 print("node image: ", img)
-print("DEV_INIT:   ", n["DEV_INIT"], " CHAIN_ID:", n["CHAIN_ID"], " MIN_GAS:", n.get("MIN_GAS_PRICES"))
+print("DEV_INIT:   ", n["DEV_INIT"], " CHAIN_ID:", n["CHAIN_ID"], " MIN_GAS:", n.get("MIN_GAS_PRICES"),
+      " mempool.max-txs:", n.get("EARTHD_MEMPOOL_MAX_TXS"))
+if n.get("NODE_ROLE"):
+    print("role:        ", n["NODE_ROLE"])
+if n.get("NODE_KEY_B64"):
+    # node id = hex of the first 20 bytes of sha256(ed25519 pubkey); the pubkey
+    # is the last 32 bytes of priv_key.value. Printed so the id archive and
+    # joiners dial can be checked against what this lease will present.
+    nk = json.loads(base64.b64decode(n["NODE_KEY_B64"]))
+    pub = base64.b64decode(nk["priv_key"]["value"])[32:]
+    print("node id:      %s (from NODE_KEY_B64)" % hashlib.sha256(pub).hexdigest()[:40])
 if not fullnode and n.get("DEV_INIT") != "1":
     kd = json.loads(base64.b64decode(n["PRIV_VALIDATOR_KEY_B64"]))
     print("consensus:   %s (from PRIV_VALIDATOR_KEY_B64)" % kd["address"])
@@ -278,7 +347,12 @@ if fullnode:
 else:
     print("secrets:     VALIDATOR_MNEMONIC(%d words), TUNNEL_TOKEN(%d chars)"
           % (len(n["VALIDATOR_MNEMONIC"].split()), len(c["TUNNEL_TOKEN"])))
-print("relayer:     ENABLED=%s%s" % (r["ENABLED"],
-      "  -> " + r.get("COUNTERPARTY_CHAIN_ID", "") + "  link=" + r.get("LINK_ON_START", "false")
-      if r["ENABLED"] == "true" else ""))
+if r:
+    print("relayer:     ENABLED=%s%s" % (r["ENABLED"],
+          "  -> " + r.get("COUNTERPARTY_CHAIN_ID", "") + "  link=" + r.get("LINK_ON_START", "false")
+          if r["ENABLED"] == "true" else ""))
+else:
+    print("relayer:     (none in this SDL)")
+if fullnode and want_tunnel:
+    print("tunnel:      %s" % tunnel_var)
 print("wrote", out, "(%d bytes)" % len(s))
