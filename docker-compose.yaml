@@ -19,6 +19,12 @@ services:
       # knew about stops existing. The entrypoint tells the two cases
       # apart purely by whether /data/config/genesis.json is present.
       - earth-data:/data
+    environment:
+      # Required on the privacy chain: the SDK's no-op app mempool. Private txs
+      # have no signer and every other mempool rejects them. -1 is the default;
+      # this pins it (earthd reads EARTHD_-prefixed env over app.toml).
+      - EARTHD_MEMPOOL_MAX_TXS=-1
+      - MIN_GAS_PRICES=0.005uerth
     restart: unless-stopped
 
 volumes:

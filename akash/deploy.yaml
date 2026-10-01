@@ -1,10 +1,19 @@
 # Akash SDL — earth-1's validator: the node, its Cloudflare tunnel, the relayer.
 #
+# PRIVACY RELAUNCH (fresh genesis, see RELAUNCH.md at the repo root). What
+# changed in this file for it: the app mempool is pinned to the no-op mempool
+# (EARTHD_MEMPOOL_MAX_TXS=-1), the fee floor is ERTH only, the genesis comment
+# names the new file and its sha (TODO until Phase 5 finalises it), and the
+# relayer's pinned IBC ids are commented out because a new genesis has no IBC
+# clients. Everything below about the 2026-09-01 lease history describes the
+# chain being replaced.
+#
 # ONE lease runs earth-1 as of 2026-09-01 (DSEQ in .env). It holds the whole
 # chain — earliest_block_height 1 — because it was rebuilt from block 1 rather
 # than state synced, and it signs with the consensus key from .env.
 #
-# Build it with `--fullnode --no-statesync --validator-key --tunnel`:
+# Build it with `--fullnode --no-statesync --validator-key --tunnel`, plus
+# `--node-key` when it is a NEW lease (the privacy relaunch; see RELAUNCH.md):
 #
 #   --fullnode       keeps VALIDATOR_MNEMONIC and NODE_KEY_B64 out of the SDL.
 #                    The node needs neither: DEV_INIT=0 creates no account, and
@@ -15,6 +24,8 @@
 #   --validator-key  injects PRIV_VALIDATOR_KEY_B64. This is the one secret that
 #                    can double-sign.
 #   --tunnel         the real TUNNEL_TOKEN, so it serves rpc/lcd.
+#   --node-key       NODE_KEY_B64, so a new lease presents the node id the
+#                    archive node (akash/deploy-archive.yaml) was told to dial.
 #
 # CAUTION, learned on 2026-09-01: --fullnode only keeps keys out of the SDL. It
 # does NOT remove a priv_validator_key.json already on a volume. A former
@@ -44,13 +55,43 @@ services:
     image: ghcr.io/zenopie/earth-network-chain@sha256:03c274793328ee4b1a4e38eab302a8b4040a7e27ce0fd35eaa21829331dd4377
 
     env:
+      # TODO(relaunch): confirm the chain id. The relaunch genesis source
+      # (chain repo networks/genesis/chain.json on privacy/main) still says
+      # earth-1; if Phase 5 picks a new id, change it here, in
+      # akash/deploy-archive.yaml, in bin/build-sdl.py (EXPECTED_CHAIN_ID), and
+      # in the backend's EARTH_CHAIN_ID.
       - CHAIN_ID=earth-1
       - MONIKER=earth-akash-validator
       # Free transactions mean free spam. Per-node config, not a chain parameter,
       # so this is a restart to change and not a governance vote. ~500uerth on a
-      # typical transaction; ads-for-gas sponsors users, so the fee is not an
-      # adoption barrier.
+      # typical transaction.
+      #
+      # ERTH only, never uanml: ANML exists only in the shielded pool and the
+      # chain refuses it as a fee. Private (unsigned) transactions pay their fee
+      # from a shielded note, and CheckTx holds that fee to this same floor; a
+      # private tx's gas is dominated by its fixed proof-verification charge
+      # (x/shielded params proof_verification_gas, 2M at genesis), so a private
+      # tx costs about 0.01 ERTH at this price. The backend's gas note
+      # (/gas/register) has to cover a registration at this price -- raise one,
+      # check the other.
       - MIN_GAS_PRICES=0.005uerth
+      #
+      # REQUIRED on the privacy chain: the SDK's no-op app mempool.
+      #
+      # Private txs (claims, votes, transfers, stake) have no signer. The SDK's
+      # priority and sender-nonce app mempools key txs by signer and sequence
+      # and reject a zero-signer tx outright, so any max-txs >= 0 makes this
+      # node refuse every private tx in CheckTx -- and as the validator, never
+      # propose one. -1 is the SDK default, so a fresh app.toml is already
+      # right; this pins it against a template or an edit that changes it.
+      # (chain app/ante.go, "nodes must run the no-op app mempool".)
+      #
+      # Set through the environment because the entrypoint does not write the
+      # [mempool] section and app.toml lives on the volume. earthd's server
+      # viper reads EARTHD_-prefixed env (the binary's name) with "." and "-"
+      # mapped to "_", and env wins over app.toml -- checked against viper
+      # v1.21.0, the version the chain builds with.
+      - EARTHD_MEMPOOL_MAX_TXS=-1
       #
       # DEV_INIT=1 makes this a NEW throwaway chain on every fresh volume: its
       # own genesis_time, its own validator, its own genesis hash. That is what
@@ -71,7 +112,14 @@ services:
       # Take this back out for a node that is meant to join a real network.
       # DEV_INIT is now OFF. networks/genesis.json carries a real gentx, so the
       # published genesis is the one this chain actually runs -- which is what
-      # makes a second validator able to join it. While DEV_INIT was on, every
+      # makes a second validator able to join it.
+      #
+      # Genesis for the privacy relaunch: the chain repo's
+      # networks/genesis.json on privacy/main, baked into the image at
+      # /etc/earth/genesis.json with its .sha256 beside it; the entrypoint
+      # refuses to start if the two disagree. Pin the sha we expect in
+      # akash/genesis.sha256 (TODO until the genesis is final) and run
+      # `bin/check-genesis.sh <tag>` before any deploy of the launch tag. While DEV_INIT was on, every
       # boot stamped its own genesis_time and collected its own gentx, so the
       # live chain and the published file were different chains that happened to
       # share a chain id.
@@ -348,10 +396,17 @@ services:
       # would forget the path and link a brand new client each restart -- which
       # is exactly what the five orphaned 07-tendermint-* clients on earth are.
       # Pinned ids make a restart resume the existing path instead.
-      - SRC_CLIENT_ID=07-tendermint-12
-      - DST_CLIENT_ID=07-tendermint-501
-      - SRC_CONNECTION_ID=connection-1
-      - DST_CONNECTION_ID=connection-407
+      #
+      # PRIVACY RELAUNCH: these ids name clients and connections on the chain
+      # being replaced. A new genesis has no IBC state at all, so they are
+      # commented out rather than left to point at nothing. Re-link with
+      # LINK_ON_START=true for ONE deploy after launch (and after deciding the
+      # chain id: the counterparty's client tracks it), then pin the new ids.
+      # The relayer key needs transparent ERTH for gas.
+      # - SRC_CLIENT_ID=07-tendermint-12
+      # - DST_CLIENT_ID=07-tendermint-501
+      # - SRC_CONNECTION_ID=connection-1
+      # - DST_CONNECTION_ID=connection-407
       # earth channel-1 <-> injective-888 channel-77143, port transfer.
       # Names the path in rly's config and in its logs. Defaults to "earth-hub",
       # which is wrong for any counterparty that is not the Cosmos Hub.
