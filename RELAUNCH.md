@@ -258,7 +258,8 @@ At `genesis_time`:
 ## 7. After launch
 
 - `EXTERNAL_ADDRESS` in `akash/deploy.yaml` = the validator's 26656 host:port, applied
-  in place with `bin/deploy.sh <tag>` (the pod is Ready now).
+  in place (the pod is Ready now) with the lease's own flags:
+  `bin/deploy.sh <tag> --fullnode --no-statesync --validator-key --node-key --tunnel`.
 - `bin/lease-logs.py` and the disk check (section 3) on a schedule.
 - Run the web app's `npm run check:dex-live` against the live LCD.
 - Remove the attestation gas endpoints from the backend once no old app build is in use.

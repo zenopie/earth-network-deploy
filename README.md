@@ -24,8 +24,12 @@ Dockerfile, and the entrypoint that lets anyone run a node. Nothing here is need
 
 ## Deploying
 
-    bin/deploy.sh <tag>              update the lease in place
-    bin/deploy.sh <tag> --print      build the SDL and read it, send nothing
+    FLAGS="--fullnode --no-statesync --validator-key --node-key --tunnel"
+    bin/deploy.sh <tag> $FLAGS            update the lease in place
+    bin/deploy.sh <tag> $FLAGS --print    build the SDL and read it, send nothing
+
+The flags are the validator's, the same ones `create.sh` made the lease with
+(RELAUNCH.md, section 3). Leaving one out is refused or drops a secret the node needs.
 
 In place keeps the volumes, so the chain keeps its height and history. Image and env
 changes can go this way. Endpoint kinds and resources cannot, because they are part of
@@ -65,7 +69,8 @@ copy of the SDL, never into the file on disk. The validator is built with
 `--validator-key` (`PRIV_VALIDATOR_KEY_B64`), `--node-key` (`NODE_KEY_B64`) and
 `--tunnel` (`TUNNEL_TOKEN`). `VALIDATOR_MNEMONIC` and `RELAYER_MNEMONIC` then never
 reach the lease: the operator account signs from the operator's machine. Without
-`--fullnode`, `build-sdl.py` takes the old devnet path and injects both mnemonics.
+`--fullnode`, `build-sdl.py` refuses this SDL: the devnet anchor it injected the
+mnemonic after is gone on purpose.
 
 Everything submitted reaches the provider regardless; that is what submitting means.
 What the injection avoids is the secrets reaching a repository.
