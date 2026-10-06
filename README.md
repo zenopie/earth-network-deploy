@@ -20,7 +20,6 @@ Dockerfile, and the entrypoint that lets anyone run a node. Nothing here is need
     bin/deploy.sh           update the lease in place (keeps the volumes)
     bin/lease-logs.py       container logs and kubernetes events, via the provider
     bin/lease-shell.py      a command inside a running container
-    docker-compose.yaml     the image on a plain Docker host
 
 ## Deploying
 

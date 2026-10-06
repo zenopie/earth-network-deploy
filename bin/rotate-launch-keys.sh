@@ -6,6 +6,9 @@
 # Each .env is first copied to .env.bak-<timestamp> (mode 600). The mnemonics
 # never reach the terminal: back them up from the .env files yourself.
 #
+# Already run for the relaunch (2026-10-04): re-running it REPLACES the launch
+# operator, whose address the ceremony and genesis name.
+#
 #   ./bin/rotate-launch-keys.sh [path/to/earthd]
 set -euo pipefail
 
