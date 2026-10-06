@@ -20,7 +20,7 @@ Run the steps in order. Each **Check** must pass before the next step.
 | Gas wallet | `earth13ysugyz4la7kfrmgsfdhk203ujt0jgcpw2avmg`. Its mnemonic is `GAS_WALLET_MNEMONIC` in the backend repo's `.env`. It is not in genesis; the validator funds it after launch (section 6). |
 | Backend | v3.0.0 on lease `1790918719150` (provider `akash1aaul837r7en7hpk9wv2svg8u78fdq0t2j2e82z`), idle. Replaced in section 4. |
 | Web | v2.0.0 on lease `1787052820013`, served at `erth.network`. Redeployed in section 5. |
-| `akash/genesis.sha256` | Still pins the v1.0.0 genesis (`be05a63d…`), which will never run. Replaced at the ceremony. |
+| `akash/genesis.sha256` | Pins `acb96128…`, the chain repo's `networks/genesis.json` at `6d3500a`. That is the **pre-ceremony** genesis: past `genesis_time`, placeholder operator, devnet accounts. `bin/check-genesis.sh` passes it with only a `genesis_time` WARN, so do not read a pass as launch-ready. Replaced at the ceremony (section 2, step 4). |
 
 **One node.** The validator is also the full-history node: it serves
 `rpc.erth.network` and `lcd.erth.network` through its tunnel, and the privacy indexer
