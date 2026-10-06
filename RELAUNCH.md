@@ -152,6 +152,14 @@ chain tunnel (one token, one live connector).
    `lease-logs.py` and `lease-shell.py` target it. That is safe because nothing else is
    live.
 
+   After the lease is taken, `create.sh` writes `akash/validator-lease.lock` (genesis
+   pin, DSEQ, provider, time). **Commit it.** Every later `--validator-key` create is
+   refused for the same genesis pin, and refused whenever the Console reports the
+   locked DSEQ or `.env`'s `DSEQ` active (or cannot be read). The one override,
+   `--replace-validator-lease <closed DSEQ> --genesis <pinned genesis.json>`, is for
+   this lease dying **before** `genesis_time` and needs that time at least 15 minutes
+   ahead; past it there is no override (section 9).
+
    Create it **with every final value**. CometBFT sleeps until `genesis_time` before
    opening any listener, so the pod is not Ready until launch. A PUT to a pod that is
    not Ready is accepted and never applied (`updated_replicas` stays 0), so anything
@@ -341,7 +349,13 @@ governance; then cosmovisor's `current` outranks the image.
 ## 9. Rollback
 
 - **Before `genesis_time`**: nothing is irreversible. Close the new leases, fix, pick a
-  **new** `genesis_time`, re-pin, re-tag, recreate.
+  **new** `genesis_time`, re-pin, re-tag, recreate (the new pin passes `create.sh`'s
+  lock). To recreate for the *same* genesis while `genesis_time` is still at least 15
+  minutes ahead, close the dead lease and pass `--replace-validator-lease <its DSEQ>
+  --genesis <pinned genesis.json>`; first check the Cloudflare dashboard shows no
+  connector on the chain tunnel (`create.sh` itself checks the Console shows the old
+  DSEQ closed). That is the whole safety check: before `genesis_time` the key has signed
+  nothing.
 - **Fails at height 1** (InitChain panic, app hash mismatch): the pod crash-loops, and a
   crash-looping pod cannot be fixed by a PUT. Either the provider deletes pod `node-0`,
   or close the lease and create a new one. Nothing is lost at height 1. Fix the genesis,

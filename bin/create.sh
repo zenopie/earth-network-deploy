@@ -8,6 +8,10 @@
 #   bin/create.sh <tag> $FLAGS --var DSEQ --yes             do not ask
 #   bin/create.sh <tag> $FLAGS --sdl-only                   build and validate, send nothing
 #
+# With --validator-key it refuses a second validator lease for the same
+# genesis (akash/validator-lease.lock, the Console API); see "one validator
+# lease per genesis" below for the checks and the one override.
+#
 # The flags are the validator's (RELAUNCH.md, section 3); build-sdl.py refuses
 # a build without --fullnode.
 #
@@ -42,11 +46,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API=https://console-api.akash.network/v1
 
-TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--fullnode] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--relayer] [--var NAME]}"
+TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--fullnode] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--relayer] [--var NAME] [--genesis <file>] [--replace-validator-lease <closed DSEQ>]}"
 shift
 
 PROVIDER=""; DEPOSIT=5; ASSUME_YES=0; SDL_ONLY=0; SDL_FILE="akash/deploy.yaml"; FULLNODE=0
-NO_STATESYNC=0; DSEQ_VAR=""
+NO_STATESYNC=0; DSEQ_VAR=""; GENESIS_FILE=""; REPLACE_DSEQ=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --provider) PROVIDER="${2:?--provider needs an address}"; shift 2 ;;
@@ -61,6 +65,8 @@ while [ $# -gt 0 ]; do
     --node-key) NODE_KEY=1; shift ;;
     --relayer)  RELAYER=1; shift ;;
     --var)      DSEQ_VAR="${2:?--var needs a name}"; shift 2 ;;
+    --genesis)  GENESIS_FILE="${2:?--genesis needs a file}"; shift 2 ;;
+    --replace-validator-lease) REPLACE_DSEQ="${2:?--replace-validator-lease needs the closed DSEQ}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -104,6 +110,13 @@ fi
 if [ "${RELAYER:-0}" = 1 ]; then
   BUILD_ARGS+=(--relayer)
 fi
+# --genesis: build-sdl.py checks the file hashes to the pin and its gentx names
+# this key. Required with --replace-validator-lease (its genesis_time decides).
+if [ -n "$GENESIS_FILE" ]; then
+  BUILD_ARGS+=(--genesis "$GENESIS_FILE")
+fi
+[ -z "$REPLACE_DSEQ" ] || [ "${VALIDATOR_KEY:-0}" = 1 ] || {
+  echo "--replace-validator-lease only applies with --validator-key" >&2; exit 2; }
 
 [ -f "$HERE/.env" ] || { echo "no .env — it holds the secrets injected into the submitted SDL" >&2; exit 1; }
 set -a; . "$HERE/.env"; set +a
@@ -137,6 +150,91 @@ except Exception:
 sys.stderr.write(raw[:800] + "\n")
 REDACT
 }
+
+# --- one validator lease per genesis (R2-BD-3) -------------------------------
+# A second lease holding the consensus key starts from height 1 of the image
+# genesis with no peers: it re-signs heights the live chain already signed
+# (double-sign evidence against the only validator, a fork every wallet sees)
+# and attaches a second connector to the tunnel, so Cloudflare splits rpc/lcd
+# between two chains (RELAUNCH.md section 9). So a --validator-key create is
+# refused when:
+#
+#   - akash/validator-lease.lock (written below after the lease is taken, and
+#     committed) records a validator lease for the SAME genesis pin. A real
+#     relaunch has a new genesis_time, so a new pin, and passes; or
+#   - the Console API reports the lock's DSEQ, or .env's DSEQ, as active (a
+#     validator, or anything else on the tunnel, still running); or
+#   - the Console API cannot be read (fail closed; try again).
+#
+# The one deliberate exception is a validator lease that died BEFORE
+# genesis_time (nothing signed yet) being recreated for the same genesis:
+#   --replace-validator-lease <its DSEQ> --genesis <the pinned genesis.json>
+# The DSEQ must be the lock's, the Console must show it closed, and the
+# genesis_time must be at least 15 minutes ahead. Past genesis_time there is
+# no override: the key may have signed, and starting over is a new genesis and
+# a new consensus key (RELAUNCH.md section 9), decided by a human.
+LOCK="$HERE/akash/validator-lease.lock"
+if [ "${VALIDATOR_KEY:-0}" = 1 ]; then
+  python3 - "$LOCK" "$HERE/akash/genesis.sha256" "${DSEQ:-}" "$REPLACE_DSEQ" "$GENESIS_FILE" <<'GUARD'
+import datetime, json, os, re, sys, urllib.error, urllib.request
+lock_path, pin_path, env_dseq, replace, genesis = sys.argv[1:6]
+pin = open(pin_path).read().split()[0]
+lock = json.load(open(lock_path)) if os.path.exists(lock_path) else None
+key = os.environ["AKASH_API_KEY"]
+
+def die(msg):
+    sys.exit("REFUSED: " + msg)
+
+def state(dseq):
+    """'active', 'closed' or 'absent' per the Console API; dies if unreadable."""
+    req = urllib.request.Request(f"https://console-api.akash.network/v1/deployments/{dseq}",
+                                 headers={"x-api-key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            d = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "absent"
+        die(f"Console API answered {e.code} for deployment {dseq}; cannot prove it is closed")
+    except Exception as e:
+        die(f"Console API unreadable for deployment {dseq} ({type(e).__name__}); cannot prove it is closed")
+    d = d.get("data", d)
+    dep = d.get("deployment", {})
+    states = [str(dep.get("state", "")).lower()] + [str(l.get("state", "")).lower() for l in d.get("leases") or []]
+    if "active" in states:
+        return "active"
+    if states[0] == "closed":
+        return "closed"
+    die(f"deployment {dseq}: unrecognised state {states}; cannot prove it is closed")
+
+for dseq, what in ((lock and lock.get("dseq"), "the validator lease in akash/validator-lease.lock"),
+                   (env_dseq, ".env's DSEQ")):
+    if dseq and state(dseq) == "active":
+        die(f"{what} ({dseq}) is active. One validator, one connector per tunnel: "
+            "update it in place with deploy.sh, or close it first (RELAUNCH.md section 9).")
+
+if lock and lock.get("genesis_sha256") == pin:
+    if not replace:
+        die(f"a validator lease ({lock.get('dseq')}, {lock.get('created')}) was already created for "
+            f"genesis {pin[:12]}…. A second one replays heights 1.. with the launch key. If that lease "
+            "died before genesis_time, see --replace-validator-lease in bin/create.sh; otherwise "
+            "this is RELAUNCH.md section 9 (a new genesis and a new key), not a create.")
+    if replace != str(lock.get("dseq")):
+        die(f"--replace-validator-lease {replace} is not the locked lease {lock.get('dseq')}")
+    if not genesis:
+        die("--replace-validator-lease needs --genesis <the pinned genesis.json>: its genesis_time decides")
+    gt = json.load(open(genesis))["genesis_time"]
+    m = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z", gt)
+    if not m:
+        die(f"genesis_time {gt!r} is not a UTC RFC 3339 time")
+    t = datetime.datetime.fromisoformat(m.group(1)).replace(tzinfo=datetime.timezone.utc)
+    left = (t - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    if left < 900:
+        die(f"genesis_time {gt} is {'past' if left < 0 else 'under 15 minutes away'}: the key may "
+            "have signed. No override: RELAUNCH.md section 9.")
+    print(f"replacing validator lease {replace} (closed) for genesis {pin[:12]}…; genesis_time in {int(left)} s")
+GUARD
+fi
 
 DIGEST="$("$HERE/bin/digest.sh" "$TAG")"
 python3 "$HERE/bin/build-sdl.py" "$HERE" "$WORK/sdl.yaml" "$DIGEST" \
@@ -313,6 +411,20 @@ CODE=$(curl -sS -m 300 -X POST \
 case "$CODE" in 2??) ;; *) echo "lease failed (http $CODE)" >&2; show_response "$WORK/leased.json"; exit 1 ;; esac
 
 echo "leased $DSEQ_NEW on $CHOSEN"
+
+# The lock the guard above reads. Commit it: it is how the next create (on any
+# clone) knows this genesis already has its validator lease.
+if [ "${VALIDATOR_KEY:-0}" = 1 ]; then
+  python3 - "$LOCK" "$HERE/akash/genesis.sha256" "$DSEQ_NEW" "$CHOSEN" <<'REC'
+import datetime, json, sys
+lock, pin_path, dseq, provider = sys.argv[1:5]
+json.dump({"genesis_sha256": open(pin_path).read().split()[0], "dseq": dseq, "provider": provider,
+           "created": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+          open(lock, "w"), indent=2)
+open(lock, "a").write("\n")
+REC
+  echo "recorded akash/validator-lease.lock: commit it"
+fi
 
 # --- 4. leave the operator with what changed ---------------------------------
 # DSEQ is written back because a stale one silently points deploy.sh at a
