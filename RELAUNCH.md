@@ -71,7 +71,9 @@ height 2.
          --validator-key --node-key --tunnel
 
    It prints the `node id` (from `NODE_KEY_B64`) and the consensus address and pubkey
-   (from `PRIV_VALIDATOR_KEY_B64`). The pubkey must be `PGqvPN4C…`.
+   (from `PRIV_VALIDATOR_KEY_B64`). It refuses a key whose pubkey is not `PGqvPN4C…`
+   (`EXPECTED_CONSENSUS_PUBKEY`), the old chain's `kTMzo…`, or an address that does not
+   derive from the pubkey.
 2. **Run the ceremony** in the chain repo, on the operator's machine:
 
        scripts/ceremony.sh --genesis-time <RFC3339, UTC> \
@@ -128,7 +130,9 @@ chain tunnel (one token, one live connector).
        bin/create.sh <tag> --fullnode --no-statesync --validator-key --node-key \
          --tunnel --sdl-only
 
-   Read the summary: chain id, `mempool.max-txs: -1`, `node id` (from `NODE_KEY_B64`),
+   Add `--genesis <the tag's release genesis.json>` to `build-sdl.py` (same flags, `.`
+   and `/dev/null`) once: it checks that file hashes to `akash/genesis.sha256` and that
+   its gentx names this key. Read the summary: chain id, `mempool.max-txs: -1`, `node id` (from `NODE_KEY_B64`),
    the consensus address, `TUNNEL_TOKEN`, and the `history:` line (`pruning=nothing
    discard_abci_responses=false tx_index=kv skip_backup=true`). `build-sdl.py` refuses
    an SDL that prunes, drops block results, state syncs or keeps the cosmovisor backup.

@@ -42,6 +42,10 @@ ap.add_argument("--relayer", action="store_true",
                      "service. Opt-in: refused unless the SDL sets the relayer's "
                      "ENABLED=true, so the key never ships to a lease that does "
                      "not run it.")
+ap.add_argument("--genesis",
+                help="with --validator-key: a genesis.json (e.g. the launch tag's "
+                     "release asset) to check the key against. It must hash to "
+                     "akash/genesis.sha256 and its gentx must name this key.")
 ap.add_argument("--fullnode", action="store_true",
                 help="required. Keeps VALIDATOR_MNEMONIC and RELAYER_MNEMONIC out "
                      "of the SDL; with nothing else it builds a node with NO "
@@ -53,6 +57,7 @@ repo, out, digest, fullnode = args.repo, args.out, args.digest, args.fullnode
 want_valkey, want_tunnel = args.validator_key, args.tunnel
 want_nodekey = args.node_key
 want_relayer = args.relayer
+assert not args.genesis or want_valkey, "--genesis only applies with --validator-key"
 assert not want_nodekey or (fullnode and want_valkey), \
     "--node-key only applies with --fullnode --validator-key"
 
@@ -60,6 +65,14 @@ assert not want_nodekey or (fullnode and want_valkey), \
 # networks/genesis/chain.json). Kept as earth-1; the new consensus key, not a new
 # id, is what keeps the old chain's signatures from counting against this one.
 EXPECTED_CHAIN_ID = "earth-1"
+# The consensus pubkey the launch genesis's one gentx names (RELAUNCH.md, "Where
+# things stand"; chain repo scripts/ceremony.sh --pubkey). --validator-key
+# refuses any other key. Change it only together with a new gentx.
+EXPECTED_CONSENSUS_PUBKEY = "PGqvPN4CxEkxvvh3tSBX0SGeBgjMdqQwZkdHt8FRLm4="
+# Keys that signed an earlier earth-1. Their signatures at the same heights
+# under the same chain id are double-sign evidence: never again (chain repo
+# scripts/ceremony.sh USED_CONSENSUS_KEYS).
+USED_CONSENSUS_PUBKEYS = {"kTMzoCBEj1g2z49K1D/jxuLGrhTsnzfTx6Gf1LnBUJw="}
 no_statesync = args.no_statesync
 # Without --fullnode this script used to inject VALIDATOR_MNEMONIC after a
 # VALIDATOR_BONDED line for a DEV_INIT devnet. akash/deploy.yaml has no such line
@@ -188,6 +201,30 @@ if fullnode:
             raise AssertionError("PRIV_VALIDATOR_KEY_B64 is not base64 of JSON: %s" % e)
         assert "priv_key" in pvk and "address" in pvk and "pub_key" in pvk, \
             "PRIV_VALIDATOR_KEY_B64 is not a priv_validator_key.json"
+        # BD-11: the key must be the one the genesis names, and never one that
+        # signed an earlier earth-1. A swapped .env otherwise brings up a
+        # validator with no power, or re-signs old heights with the old key.
+        pub = pvk["pub_key"].get("value", "")
+        assert pub not in USED_CONSENSUS_PUBKEYS, (
+            "PRIV_VALIDATOR_KEY_B64 is a consensus key that signed an earlier "
+            "earth-1 (%s…). It must never sign again under this chain id." % pub[:8])
+        assert pub == EXPECTED_CONSENSUS_PUBKEY, (
+            "PRIV_VALIDATOR_KEY_B64 pubkey %s… is not the launch gentx's %s…"
+            % (pub[:8], EXPECTED_CONSENSUS_PUBKEY[:8]))
+        raw = base64.b64decode(pub)
+        addr = hashlib.sha256(raw).hexdigest()[:40].upper()
+        assert pvk["address"].upper() == addr, (
+            "priv_validator_key.json address %s does not derive from its pubkey "
+            "(%s): the file was edited" % (pvk["address"], addr))
+        if args.genesis:
+            graw = open(args.genesis, "rb").read()
+            pin = open(os.path.join(repo, "akash/genesis.sha256")).read().split()[0]
+            assert hashlib.sha256(graw).hexdigest() == pin, (
+                "--genesis %s does not hash to akash/genesis.sha256" % args.genesis)
+            gtx = json.loads(graw)["app_state"]["genutil"]["gen_txs"]
+            gpubs = [m.get("pubkey", {}).get("key") for t in gtx for m in t["body"]["messages"]]
+            assert pub in gpubs, (
+                "the pinned genesis's gentx names %s, not this key" % gpubs)
     else:
         assert "PRIV_VALIDATOR_KEY_B64" not in n, (
             "--fullnode built an SDL carrying PRIV_VALIDATOR_KEY_B64 without "
