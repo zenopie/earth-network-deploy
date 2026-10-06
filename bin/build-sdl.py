@@ -268,6 +268,18 @@ if r and r.get("ENABLED") == "true":
     for k in ("COUNTERPARTY_CHAIN_ID", "COUNTERPARTY_RPC", "COUNTERPARTY_PREFIX"):
         assert r.get(k), f"relayer enabled but {k} is unset"
 
+# cloudflared holds TUNNEL_TOKEN: pinned by digest, and its metrics server
+# (which also serves /debug/pprof, /config and /diag/*) on loopback only (BD-4,
+# the backend's audit-6 L3).
+cf = svcs["cloudflared"]
+assert "@sha256:" in cf["image"], "cloudflared image %s is not pinned by digest" % cf["image"]
+cmd = cf.get("command") or []
+for i, arg in enumerate(cmd):
+    if arg == "--metrics" or arg.startswith("--metrics="):
+        addr = arg.split("=", 1)[1] if "=" in arg else (cmd[i + 1] if i + 1 < len(cmd) else "")
+        assert addr.startswith("127.0.0.1:") or addr.startswith("localhost:"), (
+            "cloudflared --metrics %s is not loopback: it serves pprof and /config" % addr)
+
 img = svcs["node"]["image"]
 if "relayer" in svcs:
     assert img == svcs["relayer"]["image"], "node and relayer images differ"

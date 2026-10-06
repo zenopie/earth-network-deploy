@@ -85,12 +85,12 @@ protocol is not HTTP. The provider assigns it, so after a new lease set
 `EXTERNAL_ADDRESS` to it (in place, once the pod is Ready). A stale value only stops
 inbound peers; the node still dials out.
 
-`cloudflared`'s metrics on 2000 are published too: Akash rejects a manifest with
-`zero global services`, and `/ready` is a health check for a connector that otherwise
-fails silently.
-
-    curl http://<provider>:<port>/ready
-    {"status":200,"readyConnections":4,...}
+`cloudflared` keeps a published port 2000 only because Akash rejects a manifest with
+`zero global services`. Its metrics server listens on `127.0.0.1:2000`, so that port
+answers nothing: the metrics server also serves `/debug/pprof`, `/config` and `/diag`,
+and `build-sdl.py` refuses a non-loopback `--metrics`. Check connector health with
+`bin/lease-logs.py --service cloudflared` and the Cloudflare dashboard. The image is
+pinned by digest (the same build as the backend's); bump both together.
 
 Nothing is exposed `as: 80`: on the first lease that gave a generated hostname that
 returned nginx 404 for ten minutes, indistinguishable from one never registered.

@@ -407,7 +407,11 @@ services:
     expose: []
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # Pinned by digest (final audit BD-4; the backend's SDL pins the same
+    # build, audit-6 L3). This container holds TUNNEL_TOKEN and is the only path
+    # to rpc/lcd.erth.network; `latest` meant whatever was pushed last got both
+    # on the next lease or PUT. Bump deliberately, together with the backend's.
+    image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
     # `cloudflared` first: Akash's `command` maps to Kubernetes `command`, which
     # REPLACES the image entrypoint rather than appending to it. Without the
     # binary name the container tries to exec something called `tunnel` and the
@@ -416,16 +420,20 @@ services:
       - cloudflared
       - tunnel
       - --no-autoupdate
-      # Akash rejects a manifest with "zero global services", so something must
-      # be published. Publishing cloudflared's own metrics rather than the
-      # application keeps the chain and the service reachable only through the
-      # tunnel, and /ready gives a way to check connector health without the
-      # Cloudflare dashboard — which matters here because the Console API has no
-      # logs endpoint, and a connector that fails to start is otherwise silent.
+      # Metrics on loopback only (BD-4). The metrics server also mounts Go's
+      # /debug/pprof (CPU profiles, traces, a forced GC), /config (the ingress)
+      # and /diag/*. Published on 0.0.0.0, anyone who found the provider port
+      # could read the ingress or profile the 0.1-CPU connector every wallet
+      # RPC/LCD request goes through. Check connector health with
+      # `bin/lease-logs.py --service cloudflared` and the Cloudflare dashboard.
+      # bin/build-sdl.py refuses a non-loopback --metrics.
       - --metrics
-      - 0.0.0.0:2000
+      - 127.0.0.1:2000
       - run
 
+    # Kept so the manifest's shape (and a bid's port count) does not depend on
+    # the node's p2p port: Akash rejects "zero global services". Nothing listens
+    # on it outside the container's loopback, so it answers nothing.
     expose:
       - port: 2000
         as: 2000
