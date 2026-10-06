@@ -27,9 +27,16 @@
 #      below: TLS, an Upgrade handshake, and a frame reader. Server frames are
 #      unmasked, which is the only reason it stays this short.
 #
-# Provider certificates are self-signed, so TLS verification is off — the JWT is what
-# authenticates us, and the connection carries no secret the provider does not already
-# hold. Nothing here can change the deployment: the token is scoped to reads.
+# TLS IS VERIFIED (final audit BD-10). The bearer token is itself the secret: a
+# `shell` token execs into the validator (consensus key) and the backend (hot wallet).
+# So before the token is sent the provider must prove who it is, one of two ways:
+#   1. a certificate that verifies against the system CAs for the provider's hostname
+#      (the ADX providers used here serve Let's Encrypt certificates), or
+#   2. the exact certificate the provider registered on chain (Akash's cert module,
+#      read from AKASH_LCD over verified HTTPS), for a provider with a self-signed one.
+# Anything else aborts before the Authorization header leaves this machine. Tokens are
+# minted short (TTL_SECONDS; longer only for --follow) and scoped to the operations
+# each tool needs.
 #
 # The `services=` query parameter is accepted and IGNORED by the provider; filtering
 # happens here instead. Containers are named `node-0`, `relayer-<hash>`, `cloudflared-<hash>`,
@@ -45,10 +52,15 @@ import socket
 import ssl
 import struct
 import sys
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONSOLE = "https://console-api.akash.network"
+# Akash mainnet LCD, for the provider's on-chain certificates (fallback 2 above).
+AKASH_LCD = os.environ.get("AKASH_LCD", "https://api.akashnet.net")
+# The token is checked at the websocket handshake; a one-shot read needs seconds.
+TTL_SECONDS = 300
 
 
 def load_env():
@@ -81,21 +93,64 @@ def api(url, key, body=None):
         return json.load(resp)
 
 
-def mint_token(key, scope):
-    body = {"data": {"ttl": 1800, "leases": {"access": "scoped", "scope": scope}}}
+def mint_token(key, scope, ttl=TTL_SECONDS):
+    body = {"data": {"ttl": ttl, "leases": {"access": "scoped", "scope": scope}}}
     return api(f"{CONSOLE}/v1/create-jwt-token", key, body)["data"]["token"]
 
 
 def provider_host(key, dseq):
-    """The lease says which provider ADDRESS holds it; the provider record says where."""
+    """The lease says which provider ADDRESS holds it; the provider record says where.
+
+    Returns (host, port, provider address); the address is what the on-chain
+    certificate lookup in connect() needs."""
     dep = api(f"{CONSOLE}/v1/deployments/{dseq}", key)["data"]
     addr = dep["leases"][0]["id"]["provider"]
     host = api(f"{CONSOLE}/v1/providers/{addr}", key)
     host = host.get("data", host)["hostUri"]
-    return host.replace("https://", "").split(":")
+    h, p = host.replace("https://", "").split(":")
+    return h, p, addr
 
 
-def ws_stream(host, port, path, token, on_line):
+def onchain_certs(provider):
+    """DER bytes of every VALID certificate the provider registered on chain."""
+    ders, key = set(), ""
+    while True:
+        url = (f"{AKASH_LCD}/akash/cert/v1/certificates/list?filter.owner={provider}"
+               f"&filter.state=valid&pagination.limit=100")
+        if key:
+            url += "&pagination.key=" + urllib.parse.quote(key)
+        req = urllib.request.Request(url, headers={"user-agent": "curl/8.7.1"})
+        with urllib.request.urlopen(req, timeout=30) as resp:   # verified TLS
+            page = json.load(resp)
+        for c in page.get("certificates", []):
+            pem = base64.b64decode(c["certificate"]["cert"]).decode()
+            ders.add(ssl.PEM_cert_to_DER_cert(pem))
+        key = (page.get("pagination") or {}).get("next_key") or ""
+        if not key:
+            return ders
+
+
+def connect(host, port, provider):
+    """A TLS socket to the provider whose identity is verified (see the header)."""
+    try:
+        ctx = ssl.create_default_context()
+        return ctx.wrap_socket(socket.create_connection((host, int(port)), timeout=60),
+                               server_hostname=host)
+    except ssl.SSLCertVerificationError as e:
+        why = e.verify_message
+    # Not publicly verifiable: accept only the provider's own on-chain certificate.
+    ctx = ssl._create_unverified_context()
+    sock = ctx.wrap_socket(socket.create_connection((host, int(port)), timeout=60),
+                           server_hostname=host)
+    der = sock.getpeercert(binary_form=True)
+    if provider and der in onchain_certs(provider):
+        return sock
+    sock.close()
+    sys.exit(f"refusing {host}:{port}: its certificate does not verify ({why}) and is "
+             f"not one {provider} registered on chain. No token was sent.")
+
+
+def ws_stream(host, port, path, token, on_line, provider=""):
     """Minimal RFC 6455 client: handshake, then read frames until the server closes."""
     key = base64.b64encode(os.urandom(16)).decode()
     req = (
@@ -105,9 +160,7 @@ def ws_stream(host, port, path, token, on_line):
         f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
         f"Authorization: Bearer {token}\r\n\r\n"
     )
-    ctx = ssl._create_unverified_context()
-    sock = ctx.wrap_socket(socket.create_connection((host, int(port)), timeout=60),
-                           server_hostname=host)
+    sock = connect(host, port, provider)
     sock.settimeout(60)
     sock.sendall(req.encode())
 
@@ -164,8 +217,10 @@ def main():
     env = load_env()
     dseq = args.dseq or env["DSEQ"]
     kind = "kubeevents" if args.events else "logs"
-    token = mint_token(env["AKASH_API_KEY"], ["status", "logs", "events"])
-    host, port = provider_host(env["AKASH_API_KEY"], dseq)
+    # --follow keeps the stream open; the token is presented once, at the handshake.
+    token = mint_token(env["AKASH_API_KEY"], ["status", "logs", "events"],
+                       ttl=1800 if args.follow else TTL_SECONDS)
+    host, port, provider = provider_host(env["AKASH_API_KEY"], dseq)
 
     follow = "true" if args.follow else "false"
     path = f"/lease/{dseq}/1/1/{kind}?follow={follow}"
@@ -192,7 +247,7 @@ def main():
                 continue
             print(f"{name}  {msg.get('message','')}")
 
-    ws_stream(host, port, path, token, emit)
+    ws_stream(host, port, path, token, emit, provider)
 
 
 if __name__ == "__main__":

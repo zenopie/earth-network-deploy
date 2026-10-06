@@ -37,8 +37,10 @@ def main():
 
     env = ll.load_env()
     dseq = args.dseq or env["DSEQ"]
+    # This token can exec into the container: it lives ll.TTL_SECONDS, and
+    # ws_stream verifies the provider before sending it.
     token = ll.mint_token(env["AKASH_API_KEY"], ["status", "logs", "events", "shell"])
-    host, port = ll.provider_host(env["AKASH_API_KEY"], dseq)
+    host, port, provider = ll.provider_host(env["AKASH_API_KEY"], dseq)
 
     q = [f"stdin=0", "tty=0", f"podIndex={args.pod}", f"service={args.service}"]
     q += [f"cmd{i}={ll.urllib.parse.quote(c)}" for i, c in enumerate(cmd)]
@@ -66,7 +68,7 @@ def main():
         sys.stdout.write(body)
         sys.stdout.flush()
 
-    ll.ws_stream(host, port, path, token, emit)
+    ll.ws_stream(host, port, path, token, emit, provider)
 
 
 if __name__ == "__main__":
