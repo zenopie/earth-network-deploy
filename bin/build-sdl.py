@@ -224,6 +224,14 @@ for svc in svcs:
 
 assert n.get("CHAIN_ID") == EXPECTED_CHAIN_ID, (n.get("CHAIN_ID"), EXPECTED_CHAIN_ID)
 
+# BD-1: RESET_ON_GENESIS_MISMATCH=1 wipes config/ and data/ when the volume's
+# genesis differs from the image's. On the only node that is the whole chain.
+# Refused outright, whatever its value: a mismatch must stop the node, not
+# reset it.
+assert "RESET_ON_GENESIS_MISMATCH" not in n, (
+    "RESET_ON_GENESIS_MISMATCH is set: on earth-1's only node it can destroy all "
+    "chain state on one image bump. Remove it (final audit BD-1).")
+
 # Private (unsigned) txs need the SDK's no-op app mempool; any max-txs >= 0
 # rejects them in CheckTx. Every node on this chain, every SDL.
 assert n.get("EARTHD_MEMPOOL_MAX_TXS") == "-1", (
@@ -282,7 +290,6 @@ if want_valkey:
     kd = json.loads(base64.b64decode(n["PRIV_VALIDATOR_KEY_B64"]))
     print("consensus:   %s pubkey %s (from PRIV_VALIDATOR_KEY_B64)"
           % (kd["address"], kd["pub_key"].get("value")))
-    print("reset:       RESET_ON_GENESIS_MISMATCH=%s" % n.get("RESET_ON_GENESIS_MISMATCH", "0"))
     print("external:    %s" % n.get("EXTERNAL_ADDRESS", "UNSET - peers cannot dial this node"))
 print("MODE:        --fullnode%s%s%s" % (
     " +NO-STATESYNC" if no_statesync else "",

@@ -116,13 +116,13 @@ services:
       # first, a reset volume comes up as a validator with no voting power and
       # the chain has no signer at all.
       #
-      # Cutover switch, from the DEV_INIT era: if the volume's genesis differs
-      # from the image's, throw the volume's chain away and join the image's.
-      # Keyed to the genesis hash, so it fires once per genesis change. It does
-      # nothing on a fresh volume (no genesis on disk yet). It DESTROYS ALL
-      # CHAIN STATE when it fires, so after launch no release may change the
-      # image's networks/genesis.json.
-      - RESET_ON_GENESIS_MISMATCH=1
+      # NO RESET_ON_GENESIS_MISMATCH (final audit BD-1). That cutover switch made
+      # the entrypoint `rm -rf` config/ and data/ whenever the volume's genesis
+      # differed from the image's. This volume is earth-1's only copy of its
+      # state, so one later image with a regenerated networks/genesis.json would
+      # have destroyed the chain and re-signed heights 1.. with the same key.
+      # Without it a mismatch makes the entrypoint refuse to start, which is the
+      # right failure. bin/build-sdl.py refuses an SDL that sets it.
       #
       # EXTERNAL_ADDRESS, what peers are told to dial: unset until the lease
       # exists, because the provider assigns the p2p port. Read it from the
