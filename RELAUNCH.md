@@ -126,6 +126,18 @@ height 2.
    the image on ghcr. The image's baked `/etc/earth/genesis.json` is what every node
    installs. **In this repo**, write the printed sha256 into `akash/genesis.sha256`
    and commit.
+5. **Pin the wallets' genesis check.** Earth Wallet's own-node setting compares a
+   node's `/genesis_chunked` with a pinned hash. CometBFT serves its own
+   re-encoding of the genesis, not the file bytes, so this hash differs from
+   `akash/genesis.sha256`. In the mobile repo run
+   `go run ./tools/genesishash <the tag's genesis.json>`. It prints both hashes;
+   check the file hash equals `akash/genesis.sha256`, then write the **served**
+   hash into Android's `Constants.EARTH_GENESIS_SHA256` (`Constants.kt`) and iOS's
+   `Constants.genesisSHA256` (EarthCore `Constants.swift`), and into
+   `akash/genesis-served.sha256` here. After the validator is up, confirm
+   against the live node:
+   `curl -s https://rpc.erth.network/genesis_chunked?chunk=0` (and the other
+   chunks) hashes to the same value. Build the wallet releases only after this.
 
 **Check:**
 
