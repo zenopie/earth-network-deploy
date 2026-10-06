@@ -20,7 +20,7 @@ Run the steps in order. Each **Check** must pass before the next step.
 | Gas wallet | `earth13ysugyz4la7kfrmgsfdhk203ujt0jgcpw2avmg`. Its mnemonic is `GAS_WALLET_MNEMONIC` in the backend repo's `.env`. It is not in genesis; the validator funds it after launch (section 6). |
 | Backend | v3.0.0 on lease `1790918719150` (provider `akash1aaul837r7en7hpk9wv2svg8u78fdq0t2j2e82z`), idle. Replaced in section 4. |
 | Web | v2.0.0 on lease `1787052820013`, served at `erth.network`. Redeployed in section 5. |
-| `akash/genesis.sha256` | Pins `acb96128…`, the chain repo's `networks/genesis.json` at `6d3500a`. That is the **pre-ceremony** genesis: past `genesis_time`, placeholder operator, devnet accounts. `bin/check-genesis.sh` FAILS it (past `genesis_time`, placeholder operator, devnet accounts) unless given `--allow-placeholder`. Replaced at the ceremony (section 2, step 4). |
+| `akash/genesis.sha256` | Pins `acb96128…`, the chain repo's `networks/genesis.json` at `6d3500a`, a **pre-ceremony** genesis that is already stale: the chain repo's genesis is `34fe7441…` at `20a91c6`, and it will change again with every chain commit that touches genesis inputs until the ceremony. So `bin/check-genesis.sh --chain` FAILS the pin now, with or without `--allow-placeholder`; that is expected. Nothing is pinned until the ceremony's genesis exists: section 2, step 4 writes its sha256 here, and from then on the pin and the launch tag's `genesis.json` must match. |
 
 **One node.** The validator is also the full-history node: it serves
 `rpc.erth.network` and `lcd.erth.network` through its tunnel, and the privacy indexer
@@ -94,10 +94,25 @@ height 2.
    - rebuilds the genesis (`scripts/build-genesis.sh`, then `--check`) and runs the
      genesis tests with `EARTH_REQUIRE_CEREMONY=1`, then prints the sha256.
 
-   Pass `--memo-peer` and `--moniker`: the defaults are the placeholder's
-   `4284b363…@192.168.0.2:26656` (a LAN address) and `earth-akash-devnet`. The memo is
-   informational; the lease's host:port is not known yet, so a planned hostname is
-   fine.
+   `--memo-peer` and `--moniker` are required (no defaults). `ceremony.sh` refuses a
+   private, loopback, link-local or unspecified host and the devnet moniker
+   `earth-akash-devnet`.
+
+   **The memo's port will be wrong, permanently.** The memo is sha-pinned into the
+   launch genesis, and the ceremony runs before the lease exists. Akash maps the
+   container's 26656 to a port the provider picks when the lease is created (section
+   3, step 3, reads it from the lease status), and it changes with every new lease, so
+   no value written now can be right. Nothing reads the memo to connect: CometBFT
+   dials `persistent_peers`/`seeds` from config, and joiners get the real address from
+   the docs' P2P address (section 6.6), which is filled in after the lease. Use:
+
+       --memo-peer <node id from step 1>@p2p.erth.network:26656
+
+   The node id is right forever (`NODE_KEY_B64`). The host is a name you control: after
+   the lease, point `p2p.erth.network` (an A record, **DNS only**, not proxied:
+   Cloudflare's proxy does not carry CometBFT's TCP) at the provider's ingress address
+   if you want it to resolve; the port in the memo stays `26656` and is not the one to
+   dial. Say so in the join docs (section 6.6).
 3. Confirm in `networks/genesis.json`:
    - `chain_id` `earth-1`, `genesis_time` as chosen, one gentx: operator
      `earthvaloper1…` of `earth1n6amv…`, pubkey `PGqvPN4C…`;
@@ -333,11 +348,65 @@ binary swap at a chosen height H, done by the operator (the one validator):
    in the docs for anyone running a node (a node still on the old binary at H stops
    agreeing with the chain).
 3. **Swap while the pod is Ready**, before H: `bin/deploy.sh <newtag>` with the
-   validator's flags. The pod restarts on the new image; no upgrade has happened yet,
-   so cosmovisor has no `current` and runs the image binary. Check `earthd version`
-   and that blocks continue.
+   validator's flags. The pod restarts on the new image. Cosmovisor's `current`
+   symlink points at `genesis/` (it creates that link on its first run, and only an
+   `x/upgrade` plan repoints it to `upgrades/<name>`), and the entrypoint re-links
+   `genesis/bin/earthd` to the image's binary on every start, so the new image's
+   binary is what runs. Check `earthd version` and that blocks continue.
 4. **After H**, check the fix took effect. If it changes what `earthd gas-check`
    accepts, bump the backend's earthd pin the same way (section 4.1).
+
+**Rollback.** A swap can fail two ways: the new image dies on start (a bad build, an
+ADX or path problem, a migration that panics at boot), or it runs fine below H and
+panics at H, the first block its new code runs. Either way the validator crash-loops,
+the chain stops, and what Akash allows is narrow:
+
+- A PUT (`deploy.sh`) to a pod that is not Ready is accepted and **never applied**. So
+  `deploy.sh <oldtag>` alone does not roll back a crash-looping validator.
+- What does: the provider deletes pod `node-0`, after which Kubernetes starts it from
+  the current manifest. Closing the lease is never a rollback: it destroys the volume,
+  and with it the chain (section 9).
+
+So, before every swap:
+
+1. **Provider contact, confirmed.** Name the provider's operator, the channel, and
+   their response time, and get a yes to "delete pod `node-0` of lease `<DSEQ>` on
+   request" for the swap window. No confirmed contact, no swap. (The same arrangement
+   is what a `halt-height` stop needs; see below.)
+2. **The old tag ready.** `bin/digest.sh <oldtag>` resolves, and
+   `bin/deploy.sh <oldtag> --print` with the validator's flags builds. Write down the
+   exact command.
+3. **Rehearse H, not just the sync.** The scratch node from step 1 proves start-up and
+   agreement below H, on the new image, on an ADX host. To run H itself before the
+   validator does: stop the scratch node at H-1 (`EARTHD_HALT_HEIGHT=H-1` is fine on a
+   keyless scratch node), copy its data, and run `earthd in-place-testnet` on the copy
+   with a **throwaway** validator key (never `PGqvPN4C…`) and a different chain id,
+   then let it produce H and a few blocks. That exercises the store migration and the
+   H code on the real state. Keep the scratch node itself following the validator
+   through H and compare its app hash at H+1 with the validator's.
+4. **Swap early.** Swap hours before H, so a start-up failure is found while the old
+   binary is still correct for every height.
+
+Then the rollback, by failure:
+
+- **Dies on start, before H**: `deploy.sh <oldtag>` (accepted, not yet applied), then
+  ask the provider to delete `node-0`. The old binary resumes where the chain stopped:
+  every block the new binary committed below H is one the old binary would have
+  produced. Downtime is the provider's response time.
+- **Panics while executing H** (in `FinalizeBlock`, before the app commits H): the
+  same. CometBFT may already hold block H as decided (it stores the block before
+  executing it), but the app's state is still H-1. On restart the old binary's
+  handshake replays block H's transactions under the old rules and the chain goes on;
+  block H's header carries H-1's app hash, which both binaries agree on. Postpone the
+  fix to a new H with a fixed build. If the panic came before the block was decided,
+  the old binary simply proposes H again; the FilePV state on the volume refuses a
+  conflicting vote in the same round and the next round proceeds, which is not double
+  signing.
+- **The app committed H, then a crash at H+1 or later**: the old binary cannot follow,
+  because the committed state already has the change. There is no rollback, only fix
+  forward: a corrected new binary, the same `deploy.sh` plus provider pod deletion.
+  This is why step 3's rehearsal of H matters. (A scratch node that also ran H on the
+  new binary must be resynced if the chain then went the other way.)
 
 Why not a `halt-height` stop: with `EARTHD_HALT_HEIGHT=H` the node refuses block H
 and exits, the container crash-loops, and a PUT to a pod that is not Ready is accepted
