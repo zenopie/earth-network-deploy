@@ -46,11 +46,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API=https://console-api.akash.network/v1
 
-TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--fullnode] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--relayer] [--var NAME] [--genesis <file>] [--replace-validator-lease <closed DSEQ>]}"
+TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--fullnode] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--relayer] [--var NAME] [--genesis <file>] [--replace-validator-lease <closed DSEQ>] [--first-validator-lease]}"
 shift
 
 PROVIDER=""; DEPOSIT=5; ASSUME_YES=0; SDL_ONLY=0; SDL_FILE="akash/deploy.yaml"; FULLNODE=0
-NO_STATESYNC=0; DSEQ_VAR=""; GENESIS_FILE=""; REPLACE_DSEQ=""
+NO_STATESYNC=0; DSEQ_VAR=""; GENESIS_FILE=""; REPLACE_DSEQ=""; FIRST_LEASE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --provider) PROVIDER="${2:?--provider needs an address}"; shift 2 ;;
@@ -67,6 +67,7 @@ while [ $# -gt 0 ]; do
     --var)      DSEQ_VAR="${2:?--var needs a name}"; shift 2 ;;
     --genesis)  GENESIS_FILE="${2:?--genesis needs a file}"; shift 2 ;;
     --replace-validator-lease) REPLACE_DSEQ="${2:?--replace-validator-lease needs the closed DSEQ}"; shift 2 ;;
+    --first-validator-lease) FIRST_LEASE=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -159,31 +160,55 @@ REDACT
 # between two chains (RELAUNCH.md section 9). So a --validator-key create is
 # refused when:
 #
-#   - akash/validator-lease.lock (written below after the lease is taken, and
-#     committed) records a validator lease for the SAME genesis pin. A real
+#   - akash/validator-lease.lock (written below once the deployment exists,
+#     and committed) records a validator lease for the SAME genesis pin. A real
 #     relaunch has a new genesis_time, so a new pin, and passes; or
+#   - there is no lock at all, unless --first-validator-lease says this is the
+#     first validator lease this repository has ever made (R3-BD-5: a clone
+#     that never pulled the committed lock would otherwise skip the pin check);
+#     --first-validator-lease with a lock present is refused; or
+#   - the lock is not committed, or differs from the committed copy: the next
+#     create may run from another clone, which sees only what is committed; or
 #   - the Console API reports the lock's DSEQ, or .env's DSEQ, as active (a
-#     validator, or anything else on the tunnel, still running); or
+#     validator, or anything else on the tunnel, still running), or does not
+#     know it at all (404: an AKASH_API_KEY for another account, or indexing
+#     lag; either way nothing is proven closed); or
 #   - the Console API cannot be read (fail closed; try again).
 #
 # The one deliberate exception is a validator lease that died BEFORE
 # genesis_time (nothing signed yet) being recreated for the same genesis:
 #   --replace-validator-lease <its DSEQ> --genesis <the pinned genesis.json>
-# The DSEQ must be the lock's, the Console must show it closed, and the
-# genesis_time must be at least 15 minutes ahead. Past genesis_time there is
-# no override: the key may have signed, and starting over is a new genesis and
-# a new consensus key (RELAUNCH.md section 9), decided by a human.
+# The DSEQ must be the lock's, the Console must report it "closed" (not
+# merely unknown), and the genesis_time must be at least 15 minutes ahead.
+# Past genesis_time there is no override: the key may have signed, and
+# starting over is a new genesis and a new consensus key (RELAUNCH.md
+# section 9), decided by a human.
 LOCK="$HERE/akash/validator-lease.lock"
 if [ "${VALIDATOR_KEY:-0}" = 1 ]; then
-  python3 - "$LOCK" "$HERE/akash/genesis.sha256" "${DSEQ:-}" "$REPLACE_DSEQ" "$GENESIS_FILE" <<'GUARD'
-import datetime, json, os, re, sys, urllib.error, urllib.request
-lock_path, pin_path, env_dseq, replace, genesis = sys.argv[1:6]
+  python3 - "$LOCK" "$HERE/akash/genesis.sha256" "${DSEQ:-}" "$REPLACE_DSEQ" "$GENESIS_FILE" "$FIRST_LEASE" "$HERE" <<'GUARD'
+import datetime, json, os, re, subprocess, sys, urllib.error, urllib.request
+lock_path, pin_path, env_dseq, replace, genesis, first, repo = sys.argv[1:8]
 pin = open(pin_path).read().split()[0]
 lock = json.load(open(lock_path)) if os.path.exists(lock_path) else None
 key = os.environ["AKASH_API_KEY"]
 
 def die(msg):
     sys.exit("REFUSED: " + msg)
+
+rel = os.path.relpath(lock_path, repo)
+if lock is None and first != "1":
+    die(f"no {rel} in this checkout. Every validator lease after the first is checked against "
+        "the committed lock; a clone that has not pulled it would skip that check. Pull, or, only "
+        "for the first validator lease this repository ever creates, pass --first-validator-lease.")
+if lock is not None and first == "1":
+    die(f"--first-validator-lease, but {rel} exists ({lock.get('dseq')}, {lock.get('created')}): "
+        "this is not the first validator lease")
+if lock is not None:
+    git = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True)
+    if git("ls-files", "--error-unmatch", rel).returncode != 0:
+        die(f"{rel} is not committed. Commit it: the next create may run from another clone.")
+    if git("diff", "--quiet", "HEAD", "--", rel).returncode != 0:
+        die(f"{rel} differs from the committed copy. Commit or restore it first.")
 
 def state(dseq):
     """'active', 'closed' or 'absent' per the Console API; dies if unreadable."""
@@ -209,9 +234,15 @@ def state(dseq):
 
 for dseq, what in ((lock and lock.get("dseq"), "the validator lease in akash/validator-lease.lock"),
                    (env_dseq, ".env's DSEQ")):
-    if dseq and state(dseq) == "active":
+    if not dseq:
+        continue
+    st = state(dseq)
+    if st == "active":
         die(f"{what} ({dseq}) is active. One validator, one connector per tunnel: "
             "update it in place with deploy.sh, or close it first (RELAUNCH.md section 9).")
+    if st == "absent":
+        die(f"the Console does not know {what} ({dseq}): AKASH_API_KEY may belong to another "
+            "account, or the Console has not indexed it yet. Nothing proves it closed.")
 
 if lock and lock.get("genesis_sha256") == pin:
     if not replace:
@@ -221,6 +252,10 @@ if lock and lock.get("genesis_sha256") == pin:
             "this is RELAUNCH.md section 9 (a new genesis and a new key), not a create.")
     if replace != str(lock.get("dseq")):
         die(f"--replace-validator-lease {replace} is not the locked lease {lock.get('dseq')}")
+    # Checked above as not active and not absent; say it outright, since this
+    # is the path that starts a second key holder.
+    if state(replace) != "closed":
+        die(f"--replace-validator-lease {replace}: the Console must report it closed")
     if not genesis:
         die("--replace-validator-lease needs --genesis <the pinned genesis.json>: its genesis_time decides")
     gt = json.load(open(genesis))["genesis_time"]
@@ -285,6 +320,26 @@ print("DSEQ_NEW=%s" % shlex.quote(str(dseq)))
 PY
 )"
 echo "created deployment $DSEQ_NEW"
+
+# The lock the guard above reads: how the next create (on any clone, once
+# committed) knows this genesis already has its validator lease. Written now,
+# before bids and the lease, so no interruption between the lease being taken
+# and the lock being written can leave a running validator unrecorded
+# (R3-BD-5). An interrupted create leaves a lock naming a deployment with no
+# lease: close it, and the guard's checks apply to it as to any other.
+record_lock() {
+  python3 - "$LOCK" "$HERE/akash/genesis.sha256" "$DSEQ_NEW" "$1" <<'REC'
+import datetime, json, sys
+lock, pin_path, dseq, provider = sys.argv[1:5]
+json.dump({"genesis_sha256": open(pin_path).read().split()[0], "dseq": dseq, "provider": provider,
+           "created": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+          open(lock, "w"), indent=2)
+open(lock, "a").write("\n")
+REC
+}
+if [ "${VALIDATOR_KEY:-0}" = 1 ]; then
+  record_lock "pending: no lease yet"
+fi
 
 # The manifest submitted with the lease must be the one the deployment was
 # created with, so it is taken from the create response when present and rebuilt
@@ -412,17 +467,10 @@ case "$CODE" in 2??) ;; *) echo "lease failed (http $CODE)" >&2; show_response "
 
 echo "leased $DSEQ_NEW on $CHOSEN"
 
-# The lock the guard above reads. Commit it: it is how the next create (on any
-# clone) knows this genesis already has its validator lease.
+# The provider, now that the lease is taken (the lock was written as soon as
+# the deployment existed, above). Commit it.
 if [ "${VALIDATOR_KEY:-0}" = 1 ]; then
-  python3 - "$LOCK" "$HERE/akash/genesis.sha256" "$DSEQ_NEW" "$CHOSEN" <<'REC'
-import datetime, json, sys
-lock, pin_path, dseq, provider = sys.argv[1:5]
-json.dump({"genesis_sha256": open(pin_path).read().split()[0], "dseq": dseq, "provider": provider,
-           "created": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
-          open(lock, "w"), indent=2)
-open(lock, "a").write("\n")
-REC
+  record_lock "$CHOSEN"
   echo "recorded akash/validator-lease.lock: commit it"
 fi
 

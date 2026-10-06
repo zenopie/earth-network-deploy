@@ -155,7 +155,7 @@ chain tunnel (one token, one live connector).
 1. **Dry run**, sending nothing:
 
        bin/create.sh <tag> --fullnode --no-statesync --validator-key --node-key \
-         --tunnel --sdl-only
+         --tunnel --first-validator-lease --sdl-only
 
    Add `--genesis <the tag's release genesis.json>` to `build-sdl.py` (same flags, `.`
    and `/dev/null`) once: it checks that file hashes to `akash/genesis.sha256` and that
@@ -173,19 +173,29 @@ chain tunnel (one token, one live connector).
    bidding.
 
        bin/create.sh <tag> --fullnode --no-statesync --validator-key --node-key \
-         --tunnel --provider <ADX provider> --var DSEQ
+         --tunnel --first-validator-lease --provider <ADX provider> --var DSEQ
+
+   `--first-validator-lease` is for this create only: it is how the script knows
+   that a missing `akash/validator-lease.lock` means "never made one" and not "this
+   clone has not pulled it". Every later `--validator-key` create without the lock
+   is refused, and with the flag while a lock exists is refused too.
 
    `--var DSEQ` points `.env`'s `DSEQ` at the new lease, so `deploy.sh`,
    `lease-logs.py` and `lease-shell.py` target it. That is safe because nothing else is
    live.
 
-   After the lease is taken, `create.sh` writes `akash/validator-lease.lock` (genesis
-   pin, DSEQ, provider, time). **Commit it.** Every later `--validator-key` create is
-   refused for the same genesis pin, and refused whenever the Console reports the
-   locked DSEQ or `.env`'s `DSEQ` active (or cannot be read). The one override,
+   As soon as the deployment exists (before bids and the lease), `create.sh` writes
+   `akash/validator-lease.lock` (genesis pin, DSEQ, time), and adds the provider once
+   the lease is taken. **Commit it.** Every later `--validator-key` create is refused
+   while the lock is uncommitted or differs from the committed copy, for the same
+   genesis pin, and whenever the Console reports the locked DSEQ or `.env`'s `DSEQ`
+   active, does not know it (404: another account's API key, or indexing lag), or
+   cannot be read. The one override,
    `--replace-validator-lease <closed DSEQ> --genesis <pinned genesis.json>`, is for
-   this lease dying **before** `genesis_time` and needs that time at least 15 minutes
-   ahead; past it there is no override (section 9).
+   this lease dying **before** `genesis_time`: the Console must report that DSEQ
+   `closed`, and `genesis_time` must be at least 15 minutes ahead; past it there is
+   no override (section 9). An interrupted create leaves a lock naming a deployment
+   that may have no lease: commit it, close that deployment, and use the override.
 
    Create it **with every final value**. CometBFT sleeps until `genesis_time` before
    opening any listener, so the pod is not Ready until launch. A PUT to a pod that is
@@ -436,8 +446,8 @@ governance; then cosmovisor's `current` outranks the image.
   lock). To recreate for the *same* genesis while `genesis_time` is still at least 15
   minutes ahead, close the dead lease and pass `--replace-validator-lease <its DSEQ>
   --genesis <pinned genesis.json>`; first check the Cloudflare dashboard shows no
-  connector on the chain tunnel (`create.sh` itself checks the Console shows the old
-  DSEQ closed). That is the whole safety check: before `genesis_time` the key has signed
+  connector on the chain tunnel (`create.sh` itself requires the Console to report the
+  old DSEQ `closed`; a 404 is refused). That is the whole safety check: before `genesis_time` the key has signed
   nothing.
 - **Fails at height 1** (InitChain panic, app hash mismatch): the pod crash-loops, and a
   crash-looping pod cannot be fixed by a PUT. Either the provider deletes pod `node-0`,
