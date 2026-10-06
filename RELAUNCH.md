@@ -168,6 +168,10 @@ chain tunnel (one token, one live connector).
 4. **Cloudflare rules for `rpc.*` and `lcd.*`** (akash/README.md, "Public RPC and LCD
    limits"): the block rule and both rate limits, in place before `genesis_time`. The
    node-side limits are already in the SDL (`limits:` line of the dry run).
+5. **Cloudflare no-logs settings** (NO_LOGS.md, "Cloudflare settings"): no Logpush
+   job, Web Analytics and Network Error Logging off, no Zaraz or Workers, WAF rules on
+   Block. The node and cloudflared log levels are in the SDL and checked by
+   `build-sdl.py`.
 
 **Disk.** The node keeps everything (`pruning=nothing`, every block's results) on a
 200Gi volume that only grows, and Akash cannot grow a volume in place: a bigger disk

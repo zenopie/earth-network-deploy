@@ -73,6 +73,12 @@ Akash trial deployments auto-close after 24 hours, which is the same thing.
   the LCD from the browser. The SDK's LCD CORS is all-or-nothing; while one node is
   both validator and public LCD, this is the trade.
 
+## No logs
+
+`NO_LOGS.md` at the repo root is the policy. Here: `EARTHD_LOG_LEVEL=*:info,rpc-server:error`
+on the node and `--loglevel info` on cloudflared, both refused by `build-sdl.py` at
+debug or trace. The Cloudflare settings it needs are listed there.
+
 ## Public RPC and LCD limits
 
 `rpc.erth.network` and `lcd.erth.network` are served by the validator process, the

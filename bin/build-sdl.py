@@ -339,6 +339,18 @@ for i, arg in enumerate(cmd):
         assert addr.startswith("127.0.0.1:") or addr.startswith("localhost:"), (
             "cloudflared --metrics %s is not loopback: it serves pprof and /config" % addr)
 
+# NO_LOGS.md: nothing that records client requests. cloudflared at debug/trace
+# logs request headers (CF-Connecting-IP); earthd at debug logs every RPC
+# request and its remote address.
+for i, arg in enumerate(cmd):
+    if arg in ("--loglevel", "--transport-loglevel") or arg.startswith(("--loglevel=", "--transport-loglevel=")):
+        lvl = arg.split("=", 1)[1] if "=" in arg else (cmd[i + 1] if i + 1 < len(cmd) else "")
+        assert lvl not in ("debug", "trace"), "cloudflared %s %s logs client requests" % (arg, lvl)
+ll = n.get("EARTHD_LOG_LEVEL", "")
+assert ll, "EARTHD_LOG_LEVEL unset: pin it (NO_LOGS.md)"
+assert not any(w in ll for w in ("debug", "trace")), "EARTHD_LOG_LEVEL=%s logs client requests" % ll
+assert "rpc-server:error" in ll, "EARTHD_LOG_LEVEL must hold rpc-server at error (websocket remote addresses)"
+
 img = svcs["node"]["image"]
 if "relayer" in svcs:
     assert img == svcs["relayer"]["image"], "node and relayer images differ"

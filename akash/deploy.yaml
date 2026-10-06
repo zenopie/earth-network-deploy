@@ -260,6 +260,15 @@ services:
       # app.toml [api]: concurrent LCD connections (default 1000).
       - EARTHD_API_MAX_OPEN_CONNECTIONS=200
       #
+      # ---- no logs (NO_LOGS.md) ---------------------------------------------
+      #
+      # Client traffic reaches this node only through cloudflared, so the node
+      # never sees a client's IP (only the connector's pod address), and it does
+      # not log request paths at info. rpc-server is held at error anyway: at
+      # info it logs each websocket connection's remote address, at debug every
+      # request. bin/build-sdl.py refuses debug or trace anywhere in this.
+      - EARTHD_LOG_LEVEL=*:info,rpc-server:error
+      #
       # No VALIDATOR_COINS / VALIDATOR_BONDED, on purpose: they were the
       # textual anchor the devnet build injected VALIDATOR_MNEMONIC after, so
       # without them this file cannot acquire the operator key by accident.
@@ -458,6 +467,11 @@ services:
       # bin/build-sdl.py refuses a non-loopback --metrics.
       - --metrics
       - 127.0.0.1:2000
+      # NO_LOGS.md: info logs connector state only. At debug cloudflared logs
+      # each request with its headers, CF-Connecting-IP included;
+      # bin/build-sdl.py refuses debug or trace.
+      - --loglevel
+      - info
       - run
 
     # Kept so the manifest's shape (and a bid's port count) does not depend on
