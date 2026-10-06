@@ -19,10 +19,9 @@ ap.add_argument("digest", nargs="?")          # ghcr.io/...@sha256:...
 ap.add_argument("--sdl", default="akash/deploy.yaml",
                 help="which SDL to build, relative to the repo")
 ap.add_argument("--validator-key", action="store_true",
-                help="with --fullnode: inject PRIV_VALIDATOR_KEY_B64 and nothing "
-                     "else. This is the swap — it turns the sync node into the "
-                     "validator, and MUST NOT be submitted while the old node is "
-                     "still running earthd.")
+                help="with --fullnode: inject PRIV_VALIDATOR_KEY_B64, the key "
+                     "that can double-sign. MUST NOT be submitted while any other "
+                     "node holding that key is running earthd.")
 ap.add_argument("--tunnel", action="store_true",
                 help="with --fullnode: inject the real TUNNEL_TOKEN instead of the "
                      "placeholder, so this node starts serving rpc/lcd.")
@@ -39,10 +38,11 @@ ap.add_argument("--node-key", action="store_true",
                      "with --validator-key: a second node carrying the same node "
                      "key is two peers claiming one id.")
 ap.add_argument("--fullnode", action="store_true",
-                help="build a node with NO consensus key: no validator mnemonic, "
-                     "no PRIV_VALIDATOR_KEY_B64, no NODE_KEY_B64, and a tunnel "
-                     "token placeholder. For a second node that joins the "
-                     "network to sync rather than to sign.")
+                help="required. Keeps VALIDATOR_MNEMONIC and RELAYER_MNEMONIC out "
+                     "of the SDL; with nothing else it builds a node with NO "
+                     "consensus key, no NODE_KEY_B64 and a tunnel token "
+                     "placeholder. The validator adds --validator-key, "
+                     "--node-key and --tunnel.")
 args = ap.parse_args()
 repo, out, digest, fullnode = args.repo, args.out, args.digest, args.fullnode
 want_valkey, want_tunnel = args.validator_key, args.tunnel
@@ -50,12 +50,18 @@ want_nodekey = args.node_key
 assert not want_nodekey or (fullnode and want_valkey), \
     "--node-key only applies with --fullnode --validator-key"
 
-# The chain id every SDL here must carry.
-# TODO(relaunch): earth-1 is what the relaunch genesis source says today
-# (chain repo networks/genesis/chain.json). See RELAUNCH.md, "Chain id and
-# consensus key", for why a new id (or a new consensus key) is recommended.
+# The chain id every SDL here must carry: the relaunch genesis's (chain repo
+# networks/genesis/chain.json). Kept as earth-1; the new consensus key, not a new
+# id, is what keeps the old chain's signatures from counting against this one.
 EXPECTED_CHAIN_ID = "earth-1"
 no_statesync = args.no_statesync
+# Without --fullnode this script used to inject VALIDATOR_MNEMONIC after a
+# VALIDATOR_BONDED line for a DEV_INIT devnet. akash/deploy.yaml has no such line
+# on purpose, so the mnemonic never reaches a lease: refuse up front.
+if not fullnode:
+    sys.exit("build-sdl.py: pass --fullnode (the validator is built with "
+             "--fullnode --no-statesync --validator-key --node-key --tunnel; "
+             "see RELAUNCH.md, section 3)")
 assert not no_statesync or fullnode, \
     "--no-statesync only applies on top of --fullnode"
 assert not (want_valkey or want_tunnel) or fullnode, \
@@ -91,28 +97,6 @@ if digest:
     assert n, "no ghcr image line to pin"
     print("pinned %d image line(s) to %s" % (n, digest.split("@")[-1][:19] + "…"))
 
-# node: the devnet validator key, appended after the last VALIDATOR_* line
-if not fullnode:
-    anchor = "      - VALIDATOR_BONDED=100000000uerth\n"
-    assert s.count(anchor) == 1, "VALIDATOR_BONDED anchor moved"
-    s = s.replace(anchor, anchor + f"      - VALIDATOR_MNEMONIC={env['VALIDATOR_MNEMONIC']}\n")
-
-# node: the consensus key named in the genesis gentx, and the node key that
-# fixes the peer id. Base64 in .env, passed through verbatim -- the entrypoint
-# decodes them. Raw JSON here would be a YAML flow mapping, not a string.
-#
-# PRIV_VALIDATOR_KEY_B64 is the key that can double-sign. It is in this file for
-# a single-validator devnet whose whole state is disposable; a validator with
-# real stake should use PRIV_VALIDATOR_LADDR and a remote signer instead
-# (akash/REMOTE_SIGNER.md).
-# In --fullnode this loop is skipped entirely. Both keys are identity: the
-# consensus key is the one that can double-sign, and reusing the node key would
-# put two peers on the network claiming the same id.
-if not fullnode:
-    for var in ("PRIV_VALIDATOR_KEY_B64", "NODE_KEY_B64"):
-        if env.get(var):
-            s = s.replace(anchor, anchor + f"      - {var}={env[var]}\n")
-
 # A --fullnode SDL without --validator-key describes a node that must not be
 # able to sign. Saying so in the SDL is not enough: the entrypoint only ever
 # OVERWRITES priv_validator_key.json, so a volume that was once a validator
@@ -124,9 +108,12 @@ if fullnode and not want_valkey:
     assert s.count(guard_anchor) == 1, "DEV_INIT anchor moved"
     s = s.replace(guard_anchor, guard_anchor + "      - REQUIRE_NO_CONSENSUS_KEY=1\n")
 
-# The swap. Only the consensus key: the node keeps the p2p identity it synced
-# with, and DEV_INIT=0 means no account needs creating, so the mnemonic stays
-# out. One secret, added at one moment, for one reason.
+# The consensus key the genesis gentx names (and, with --node-key, the node key
+# that fixes the peer id). Base64 in .env, passed through verbatim -- the
+# entrypoint decodes them; raw JSON here would be a YAML flow mapping. DEV_INIT=0
+# creates no account, so the mnemonic stays out. PRIV_VALIDATOR_KEY_B64 can
+# double-sign: a validator with real stake should move to PRIV_VALIDATOR_LADDR
+# and a remote signer (akash/REMOTE_SIGNER.md).
 if fullnode and want_valkey:
     key_anchor = "      - DEV_INIT=0\n"
     assert s.count(key_anchor) == 1, "DEV_INIT anchor moved"
@@ -188,6 +175,12 @@ if fullnode:
             "signing identity; refusing to submit one that does.")
     if want_valkey:
         assert n.get("PRIV_VALIDATOR_KEY_B64"), "--validator-key injected nothing"
+        try:
+            pvk = json.loads(base64.b64decode(n["PRIV_VALIDATOR_KEY_B64"]))
+        except Exception as e:
+            raise AssertionError("PRIV_VALIDATOR_KEY_B64 is not base64 of JSON: %s" % e)
+        assert "priv_key" in pvk and "address" in pvk and "pub_key" in pvk, \
+            "PRIV_VALIDATOR_KEY_B64 is not a priv_validator_key.json"
     else:
         assert "PRIV_VALIDATOR_KEY_B64" not in n, (
             "--fullnode built an SDL carrying PRIV_VALIDATOR_KEY_B64 without "
@@ -199,30 +192,13 @@ if fullnode:
     assert n.get("DEV_INIT") == "0", "--fullnode must join an existing chain, not init one"
     if not no_statesync:
         assert n.get("STATESYNC_RPC_SERVERS"), (
-            "--fullnode with no STATESYNC_RPC_SERVERS: earth-1 has applied "
-            "consensus-breaking upgrades, so it cannot be replayed from genesis by "
-            "one binary. Without state sync this node can never catch up. Pass "
-            "--no-statesync if this node already holds the data, or if you are "
-            "driving the binaries by hand.")
+            "--fullnode with no STATESYNC_RPC_SERVERS. Pass --no-statesync: "
+            "this SDL is the full-history node, which never state syncs (and "
+            "the check below refuses STATESYNC_RPC_SERVERS outright).")
     else:
-        # The assertion above is right about ONE binary and wrong about three,
-        # and it is also wrong about a node that already has the blocks.
-        #
-        # Two nodes legitimately run without state sync. One RESUMES a volume it
-        # already filled — it has the history and needs no catch-up mechanism at
-        # all. The other REPLAYS earth-1 from block 1, crossing two upgrade
-        # heights — 30100 (v0.6.0) and 50100 (v0.7.0) — at which the app halts on
-        # purpose and refuses to continue on the old binary. Normally cosmovisor
-        # swaps them; USE_COSMOVISOR=false plus a deploy.sh PUT per halt does the
-        # same job without cosmovisor's height detection, which loses a race on a
-        # small node (see the v0.6.0 halt postmortem) and is still RPC-only as of
-        # v1.7.3 — verified in its scanner.go, not assumed.
-        #
-        # This is the ONLY thing --no-statesync relaxes. Every guarantee that
-        # makes --fullnode safe — no mnemonic, no node key, no consensus key
-        # without an explicit --validator-key — is asserted above and still
-        # applies, because a node replaying history must no more double-sign
-        # than one catching up by state sync.
+        # A full-history node starts its volume at block 1 (or resumes one it
+        # already filled). This is the ONLY thing --no-statesync relaxes; every
+        # no-signing-identity guarantee above still applies.
         assert not n.get("STATESYNC_RPC_SERVERS"), (
             "--no-statesync with STATESYNC_RPC_SERVERS set: state sync would "
             "jump this node to a trusted height and it would never hold the "
@@ -239,18 +215,6 @@ if fullnode:
     assert "RELAYER_MNEMONIC" not in r, (
         "--fullnode built an SDL carrying RELAYER_MNEMONIC; the relayer is off "
         "on this node and the key has no business reaching a second provider")
-elif n.get("DEV_INIT") == "1":
-    pass
-else:
-    assert n.get("PRIV_VALIDATOR_KEY_B64"), (
-        "DEV_INIT=0 with no PRIV_VALIDATOR_KEY_B64 — this node would join with a "
-        "random consensus key, hold no voting power, and the chain would have no "
-        "signer. Set it in .env, or set DEV_INIT=1 for a throwaway chain.")
-    try:
-        k = json.loads(base64.b64decode(n["PRIV_VALIDATOR_KEY_B64"]))
-    except Exception as e:
-        raise AssertionError("PRIV_VALIDATOR_KEY_B64 is not base64 of JSON: %s" % e)
-    assert "priv_key" in k and "address" in k, "PRIV_VALIDATOR_KEY_B64 is not a priv_validator_key.json"
 
 # An SDL with a <placeholder> left in it would boot a node that dials, or
 # advertises, nothing real. Fill it in or comment the line out.
@@ -283,19 +247,12 @@ for k, want in (("EARTHD_PRUNING", "nothing"),
 assert not n.get("STATESYNC_RPC_SERVERS"), (
     "STATESYNC_RPC_SERVERS set: state sync floors the node at its trust height "
     "and the indexer would have a permanent hole below it")
-mn = n.get("VALIDATOR_MNEMONIC", "")
-if not fullnode:
-    assert len(mn.split()) in (12, 24), "validator mnemonic missing/malformed"
-    assert not any(c in mn for c in "\"'"), "mnemonic carries quote characters; BIP39 will reject it"
-    assert mn == mn.strip(), "mnemonic has leading/trailing whitespace"
-    assert c.get("TUNNEL_TOKEN", "").startswith("eyJ"), "tunnel token missing or not a JWT"
+if want_tunnel:
+    assert c.get("TUNNEL_TOKEN", "").startswith("eyJ"), "--tunnel injected no real token"
 else:
-    if want_tunnel:
-        assert c.get("TUNNEL_TOKEN", "").startswith("eyJ"), "--tunnel injected no real token"
-    else:
-        assert c.get("TUNNEL_TOKEN") == TUNNEL_PLACEHOLDER, (
-            "--fullnode must not carry the live tunnel token: a second replica on "
-            "that tunnel splits real traffic onto a node that is still syncing")
+    assert c.get("TUNNEL_TOKEN") == TUNNEL_PLACEHOLDER, (
+        "--fullnode must not carry the live tunnel token: a second replica on "
+        "that tunnel splits real traffic onto a node that is still syncing")
 if r and r.get("ENABLED") == "true":
     rm = r.get("RELAYER_MNEMONIC", "")
     assert len(rm.split()) in (12, 24), "relayer enabled but its mnemonic is missing/malformed"
@@ -320,28 +277,21 @@ if n.get("NODE_KEY_B64"):
     nk = json.loads(base64.b64decode(n["NODE_KEY_B64"]))
     pub = base64.b64decode(nk["priv_key"]["value"])[32:]
     print("node id:      %s (from NODE_KEY_B64)" % hashlib.sha256(pub).hexdigest()[:40])
-if not fullnode and n.get("DEV_INIT") != "1":
+if want_valkey:
+    # Public halves only: the address and pubkey the genesis gentx must name.
     kd = json.loads(base64.b64decode(n["PRIV_VALIDATOR_KEY_B64"]))
-    print("consensus:   %s (from PRIV_VALIDATOR_KEY_B64)" % kd["address"])
-    print("node key:    %s" % ("injected" if n.get("NODE_KEY_B64") else "MISSING - node id will change on reset"))
+    print("consensus:   %s pubkey %s (from PRIV_VALIDATOR_KEY_B64)"
+          % (kd["address"], kd["pub_key"].get("value")))
     print("reset:       RESET_ON_GENESIS_MISMATCH=%s" % n.get("RESET_ON_GENESIS_MISMATCH", "0"))
     print("external:    %s" % n.get("EXTERNAL_ADDRESS", "UNSET - peers cannot dial this node"))
-if fullnode:
-    print("MODE:        --fullnode%s%s%s" % (
-        " +NO-STATESYNC" if no_statesync else "",
-        " +VALIDATOR-KEY (THE SWAP)" if want_valkey else " — no consensus key",
-        " +TUNNEL" if want_tunnel else " — tunnel placeholder"))
-    if no_statesync:
-        # Which of the two it is depends on the volume, which this script cannot
-        # see, so say what was configured rather than guessing at the outcome.
-        print("no statesync: resumes its volume, or replays from block 1 if empty"
-              " — cosmovisor=%s" % n.get("USE_COSMOVISOR", "false"))
-    else:
-        print("state sync:  height %s via %s" % (n["STATESYNC_TRUST_HEIGHT"], n["STATESYNC_RPC_SERVERS"]))
-    print("peers:       %s" % (n["PERSISTENT_PEERS"] or "(none — solo node)"))
-else:
-    print("secrets:     VALIDATOR_MNEMONIC(%d words), TUNNEL_TOKEN(%d chars)"
-          % (len(n["VALIDATOR_MNEMONIC"].split()), len(c["TUNNEL_TOKEN"])))
+print("MODE:        --fullnode%s%s%s" % (
+    " +NO-STATESYNC" if no_statesync else "",
+    " +VALIDATOR-KEY" if want_valkey else " — no consensus key",
+    " +TUNNEL" if want_tunnel else " — tunnel placeholder"))
+# Which it is depends on the volume, which this script cannot see.
+print("no statesync: resumes its volume, or starts from block 1 if empty"
+      " — cosmovisor=%s" % n.get("USE_COSMOVISOR", "false"))
+print("peers:       %s" % (n["PERSISTENT_PEERS"] or "(none — solo node)"))
 if r:
     print("relayer:     ENABLED=%s%s" % (r["ENABLED"],
           "  -> " + r.get("COUNTERPARTY_CHAIN_ID", "") + "  link=" + r.get("LINK_ON_START", "false")
