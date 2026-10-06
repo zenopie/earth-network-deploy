@@ -2,11 +2,10 @@
 #
 # PRIVACY RELAUNCH (fresh genesis, see RELAUNCH.md at the repo root). What
 # changed in this file for it: the app mempool is pinned to the no-op mempool
-# (EARTHD_MEMPOOL_MAX_TXS=-1), the fee floor is ERTH only, the genesis comment
-# names the new file and its sha (TODO until Phase 5 finalises it), and the
-# relayer's pinned IBC ids are commented out because a new genesis has no IBC
-# clients. Everything below about the 2026-09-01 lease history describes the
-# chain being replaced.
+# (EARTHD_MEMPOOL_MAX_TXS=-1), the fee floor is ERTH only, the node keeps full
+# history, and the relayer's pinned IBC ids are commented out because a new
+# genesis has no IBC clients. The genesis sha this lease must run is pinned in
+# akash/genesis.sha256.
 #
 # ONE NODE. This lease is earth-1's validator AND its full-history (archive)
 # RPC node: rpc.erth.network and lcd.erth.network are served from it through
@@ -16,24 +15,20 @@
 # synced -- and its data volume only ever grows. See "full history" in the env
 # below and the data volume sizing in the compute profile.
 #
-# ONE lease runs earth-1 as of 2026-09-01 (DSEQ in .env). It holds the whole
-# chain — earliest_block_height 1 — because it was rebuilt from block 1 rather
-# than state synced, and it signs with the consensus key from .env.
+# ONE lease (DSEQ in .env) signs with the consensus key from .env. Build it
+# with `--fullnode --no-statesync --validator-key --node-key --tunnel` (see
+# RELAUNCH.md, section 3):
 #
-# Build it with `--fullnode --no-statesync --validator-key --tunnel`, plus
-# `--node-key` when it is a NEW lease (the privacy relaunch; see RELAUNCH.md):
-#
-#   --fullnode       keeps VALIDATOR_MNEMONIC and NODE_KEY_B64 out of the SDL.
-#                    The node needs neither: DEV_INIT=0 creates no account, and
-#                    its p2p identity is already on the volume. Keeping the
-#                    mnemonic off this lease is why governance transactions are
-#                    signed from the operator's machine instead.
+#   --fullnode       keeps VALIDATOR_MNEMONIC and RELAYER_MNEMONIC out of the
+#                    SDL. DEV_INIT=0 creates no account, so the node needs no
+#                    mnemonic; keeping it off this lease is why governance
+#                    transactions are signed from the operator's machine.
 #   --no-statesync   this node HAS the history; state sync would floor it.
 #   --validator-key  injects PRIV_VALIDATOR_KEY_B64. This is the one secret that
 #                    can double-sign.
 #   --tunnel         the real TUNNEL_TOKEN, so it serves rpc/lcd.
-#   --node-key       NODE_KEY_B64, so a new lease presents the node id joiners
-#                    were told to dial.
+#   --node-key       NODE_KEY_B64, so the lease presents the node id joiners
+#                    were told to dial from its first boot.
 #
 # CAUTION, learned on 2026-09-01: --fullnode only keeps keys out of the SDL. It
 # does NOT remove a priv_validator_key.json already on a volume. A former
@@ -55,19 +50,17 @@ version: "2.0"
 services:
   # --- the chain -----------------------------------------------------------
   node:
-    # PINNED BY CI — .github/workflows/docker-build.yml rewrites every `image:`
-    # line here with the digest it just pushed and commits it back to master.
-    # A version tag is mutable and a digest is not; on a chain the difference
-    # between "the image I tested" and "an image with that name" is a consensus
-    # failure. The workflow fails the release if its pattern stops matching.
+    # Placeholder. bin/deploy.sh and bin/create.sh resolve the release tag to
+    # its digest (bin/digest.sh) and pin the submitted copy; nothing commits a
+    # digest here. A tag is mutable and a digest is not, and on a chain the
+    # difference between "the image I tested" and "an image with that name" is
+    # a consensus failure.
     image: ghcr.io/zenopie/earth-network-chain@sha256:03c274793328ee4b1a4e38eab302a8b4040a7e27ce0fd35eaa21829331dd4377
 
     env:
-      # TODO(relaunch): confirm the chain id. The relaunch genesis source
-      # (chain repo networks/genesis/chain.json on privacy/main) still says
-      # earth-1; if Phase 5 picks a new id, change it here, in
-      # bin/build-sdl.py (EXPECTED_CHAIN_ID), and in the backend's
-      # EARTH_CHAIN_ID.
+      # The relaunch genesis's chain id (chain repo networks/genesis/chain.json).
+      # Changing it means bin/build-sdl.py (EXPECTED_CHAIN_ID) and the
+      # backend's EARTH_CHAIN_ID too.
       - CHAIN_ID=earth-1
       - MONIKER=earth-akash-validator
       # Free transactions mean free spam. Per-node config, not a chain parameter,
@@ -101,45 +94,21 @@ services:
       # v1.21.0, the version the chain builds with.
       - EARTHD_MEMPOOL_MAX_TXS=-1
       #
-      # DEV_INIT=1 makes this a NEW throwaway chain on every fresh volume: its
-      # own genesis_time, its own validator, its own genesis hash. That is what
-      # this deployment has always done, and it is now something you have to ask
-      # for. Without it the node installs the release genesis, verifies it
-      # against the published sha256, creates no keys, and waits — which is what
-      # joining a network looks like, and which produces no blocks until there is
-      # a validator set.
+      # DEV_INIT=0: join the image's genesis. On a fresh volume the entrypoint
+      # installs /etc/earth/genesis.json, checks it against the .sha256 baked
+      # beside it, creates no keys and waits for genesis_time. Blocks come only
+      # because networks/genesis.json carries the gentx naming the consensus key
+      # build-sdl.py injects. (DEV_INIT=1 would build a throwaway chain with its
+      # own genesis_time and gentx on every fresh volume.)
       #
-      # Set here, because this deployment IS the devnet. The release genesis
-      # carries no gentx — `build-genesis.sh` reports "launching with an empty
-      # validator set" — so on a fresh volume the join path would install it,
-      # verify it, create no keys and then produce no blocks forever, with the
-      # pod reporting ready the whole time. VALIDATOR_MNEMONIC below recovers
-      # the same validator address across rebuilds, so a wipe changes the
-      # genesis hash and the block history but not who signs.
-      #
-      # Take this back out for a node that is meant to join a real network.
-      # DEV_INIT is now OFF. networks/genesis.json carries a real gentx, so the
-      # published genesis is the one this chain actually runs -- which is what
-      # makes a second validator able to join it.
-      #
-      # Genesis for the privacy relaunch: the chain repo's
-      # networks/genesis.json on privacy/main, baked into the image at
-      # /etc/earth/genesis.json with its .sha256 beside it; the entrypoint
-      # refuses to start if the two disagree. Pin the sha we expect in
-      # akash/genesis.sha256 (TODO until the genesis is final) and run
-      # `bin/check-genesis.sh <tag>` before any deploy of the launch tag. While DEV_INIT was on, every
-      # boot stamped its own genesis_time and collected its own gentx, so the
-      # live chain and the published file were different chains that happened to
-      # share a chain id.
+      # The genesis this lease must run is pinned in akash/genesis.sha256; run
+      # `bin/check-genesis.sh <tag>` before deploying the launch tag.
       - DEV_INIT=0
 
       # --- peers ------------------------------------------------------------
-      # No state sync here, deliberately: this node HOLDS the history. It was
-      # rebuilt from block 1 across both consensus-breaking upgrades (v0.6.0 at
-      # 30100, v0.7.0 at 50100) by running each binary in turn, which is why
-      # earliest_block_height is 1 and not a state-sync trust height. Re-adding
-      # STATESYNC_* here would floor a rebuilt volume at the trust height and
-      # throw away exactly what the rebuild was for.
+      # No state sync, deliberately: this node holds the history from block 1.
+      # STATESYNC_* would floor it at the trust height. No peers either: it is
+      # earth-1's only node, and an explicitly empty value says so.
       - PERSISTENT_PEERS=
       #
       # The consensus key the genesis gentx names, and the node key that fixes
@@ -147,22 +116,19 @@ services:
       # first, a reset volume comes up as a validator with no voting power and
       # the chain has no signer at all.
       #
-      # One-shot cutover switch. The volume holds the old DEV_INIT chain, whose
-      # genesis differs from the image's, and this says "throw it away and join
-      # the image's chain". Safe to leave set: it is keyed to the genesis hash,
-      # so it fires on the first boot after the genesis changes and never again.
-      # It DESTROYS ALL CHAIN STATE when it fires.
+      # Cutover switch, from the DEV_INIT era: if the volume's genesis differs
+      # from the image's, throw the volume's chain away and join the image's.
+      # Keyed to the genesis hash, so it fires once per genesis change. It does
+      # nothing on a fresh volume (no genesis on disk yet). It DESTROYS ALL
+      # CHAIN STATE when it fires, so after launch no release may change the
+      # image's networks/genesis.json.
       - RESET_ON_GENESIS_MISMATCH=1
       #
-      # What peers are told to dial. Without it the node advertises its pod
-      # address -- 0.0.0.0 in practice -- and nothing outside the cluster can
-      # reach it, which is why the chain sat at n_peers 0 with the port open.
-      # The provider assigns this port; re-read it from the lease status after
-      # any structural change.
-      # Deliberately unset. The provider assigns this lease its own p2p port
-      # and it is not known until the lease exists; read it from the lease
-      # status and set it with an in-place env PUT. A node that only dials out
-      # to PERSISTENT_PEERS does not need it to sync.
+      # EXTERNAL_ADDRESS, what peers are told to dial: unset until the lease
+      # exists, because the provider assigns the p2p port. Read it from the
+      # lease status and set it with an in-place env PUT once the pod is Ready
+      # (RELAUNCH.md, section 7). Unset, the node advertises its pod address and
+      # cannot be dialled inbound; it still dials out.
       #
       # ---- upgrades --------------------------------------------------------
       #
@@ -177,13 +143,10 @@ services:
       # carries its own lib/ -- earthd links libwasmvm dynamically and the two
       # are version-locked, so an upgrade that changed the CosmWasm version would
       # otherwise start the new binary against the old image's libwasmvm.
-      # true again as of 2026-09-01. It was false for the replay from block 1,
-      # which crossed 30100 (v0.6.0) and 50100 (v0.7.0) and wanted a swap that
-      # could not lose a race. That replay is finished; this is now the
-      # validator, and an upgrade it cannot apply unattended is a halt that
-      # lasts until a human notices.
+      # An upgrade the validator cannot apply unattended is a halt that lasts
+      # until a human notices.
       #
-      # The race that stranded v0.6.0 was a 0.5 CPU symptom: cosmovisor's
+      # The race that stranded v0.6.0 on the old chain was a 0.5 CPU symptom: cosmovisor's
       # CheckUpdate confirms the plan height by spawning a second earthd to ask
       # the node its own RPC, and the node has already panicked. Still RPC-only
       # in v1.7.3 (verified in its scanner.go — the upstream fix, cosmos-sdk
@@ -268,24 +231,10 @@ services:
       # from the block producer; while one node is both, this is the trade.
       - API_UNSAFE_CORS=1
       #
-      # Both ignored unless DEV_INIT=1 — the join path creates no accounts.
-      # VALIDATOR_COINS / VALIDATOR_BONDED are gone on purpose. They are the
-      # textual anchor build-sdl.py appends the validator mnemonic and
-      # PRIV_VALIDATOR_KEY_B64 after; with no anchor there is no way for this
-      # file to acquire a consensus key by accident.
-      #
-      # VALIDATOR_MNEMONIC is NOT in this file, but it is no longer unset: it is
-      # injected into the submitted copy from the gitignored .env, like
-      # TUNNEL_TOKEN. Everything submitted still reaches the provider, so the
-      # devnet validator key is exposed to whoever hosts the lease. That is a
-      # deliberate trade, made on 2026-08-19: with it unset the entrypoint
-      # generates a key and prints the mnemonic once into a container log the
-      # Console API cannot read, which means nobody can fund a test wallet or
-      # seed a DEX pool, because only the validator holds coins at genesis.
-      #
-      # It can only be chosen at genesis. Setting it on an existing chain does
-      # nothing — the entrypoint skips key creation once /data/config/genesis.json
-      # exists — so changing your mind costs another wipe.
+      # No VALIDATOR_COINS / VALIDATOR_BONDED, on purpose: they were the
+      # textual anchor the devnet build injected VALIDATOR_MNEMONIC after, so
+      # without them this file cannot acquire the operator key by accident.
+      # build-sdl.py --fullnode keeps the mnemonic out of the submitted copy.
       #
       # Remote consensus signer. The node stops holding its own consensus key
       # and asks tmkms for every signature instead — see REMOTE_SIGNER.md.
@@ -376,7 +325,7 @@ services:
   # steering, so connectors reaching different origins would black-hole traffic.
   # IBC relayer. OFF by default — see docker/relayer.sh.
   #
-  # Same image as the node, deliberately: one image is one digest for CI to pin
+  # Same image as the node, deliberately: one image is one digest to pin
   # and one artefact to reason about. The relayer binary is just a second entry
   # point in it.
   #
@@ -385,7 +334,7 @@ services:
   # proofs both chains verify themselves — so its key pays gas and holds nothing
   # else. The failure mode is delay, not theft.
   relayer:
-    # PINNED BY CI alongside the node's image; both are this repo.
+    # Placeholder, pinned with the node's image at deploy time: same image.
     image: ghcr.io/zenopie/earth-network-chain@sha256:03c274793328ee4b1a4e38eab302a8b4040a7e27ce0fd35eaa21829331dd4377
     command:
       - /usr/local/bin/relayer.sh
@@ -436,8 +385,7 @@ services:
       # PRIVACY RELAUNCH: these ids name clients and connections on the chain
       # being replaced. A new genesis has no IBC state at all, so they are
       # commented out rather than left to point at nothing. Re-link with
-      # LINK_ON_START=true for ONE deploy after launch (and after deciding the
-      # chain id: the counterparty's client tracks it), then pin the new ids.
+      # LINK_ON_START=true for ONE deploy after launch, then pin the new ids.
       # The relayer key needs transparent ERTH for gas.
       # - SRC_CLIENT_ID=07-tendermint-12
       # - DST_CLIENT_ID=07-tendermint-501
