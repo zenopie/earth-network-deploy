@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT="${PROJECTS_DIR:-$HOME/Documents/projects}"
 DEPLOY_ENV="${DEPLOY_ENV:-$ROOT/earth-network-deploy/.env}"
 BACKEND_ENV="${BACKEND_ENV:-$ROOT/earth-network-backend/.env}"
-CHAIN="${CHAIN_DIR:-$ROOT/earth-network}"
+CHAIN="${CHAIN_DIR:-$ROOT/earth-network-chain}"
 
 WORK="$(mktemp -d)"
 chmod 700 "$WORK"
