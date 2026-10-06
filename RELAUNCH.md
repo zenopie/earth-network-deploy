@@ -135,9 +135,16 @@ height 2.
    hash into Android's `Constants.EARTH_GENESIS_SHA256` (`Constants.kt`) and iOS's
    `Constants.genesisSHA256` (EarthCore `Constants.swift`), and into
    `akash/genesis-served.sha256` here. After the validator is up, confirm
-   against the live node:
-   `curl -s https://rpc.erth.network/genesis_chunked?chunk=0` (and the other
-   chunks) hashes to the same value. Build the wallet releases only after this.
+   against the live node. The pinned hash is over the base64-decoded
+   `result.data` of every chunk, concatenated in order (the pipeline in
+   `tools/genesishash`'s header), not over the JSON response:
+
+       curl -s 'https://rpc.erth.network/genesis_chunked?chunk=0' | jq -r .result.total   # 1 at 1.3 MB
+       for i in $(seq 0 $(( $(curl -s 'https://rpc.erth.network/genesis_chunked?chunk=0' | jq -r .result.total) - 1 ))); do
+         curl -s "https://rpc.erth.network/genesis_chunked?chunk=$i" | jq -r .result.data | base64 -d
+       done | shasum -a 256
+
+   It must print the served hash. Build the wallet releases only after this.
 
 **Check:**
 
@@ -211,14 +218,20 @@ chain tunnel (one token, one live connector).
    - the 26656 host:port from the lease status. Record it for `EXTERNAL_ADDRESS` and
      the docs' P2P address.
 4. **Cloudflare rules for `rpc.*` and `lcd.*`** (akash/README.md, "Public RPC and LCD
-   limits"): the block rule, the `earth_backend_egress` IP list (empty until
-   section 4.5), and both rate limits (search only on the exact path
-   `/cosmos/tx/v1beta1/txs` with `query`/`events`; by-hash lookups never), in place
-   before `genesis_time`. The node-side limits are already in the SDL (`limits:` line of the dry run).
+   limits"), in place before `genesis_time`: rule 0 (Skip for the backend's
+   `CHAIN_EDGE_TOKEN` header; generate the token now and put it in the backend's
+   `.env`, section 4.3 needs it), rule 1 (the RPC GET allowlist: no POST, no
+   `/websocket`, decoded `/abci_query` checks), rule 2 (LCD: no form POSTs, no
+   method override, POST only to broadcast and simulate), and the rate limits in the
+   variant your plan accepts (search on the exact path `/cosmos/tx/v1beta1/txs`, GET;
+   by-hash lookups never). Run that section's outside checks after the node is up.
+   The node-side limits are already in the SDL (`limits:` line of the dry run,
+   `rpc_subs=0`).
 5. **Cloudflare no-logs settings** (NO_LOGS.md, "Cloudflare settings"): no Logpush
-   job, Web Analytics and Network Error Logging off, no Zaraz or Workers, WAF rules on
-   Block. The node and cloudflared log levels are in the SDL and checked by
-   `build-sdl.py`.
+   job, Web Analytics and Network Error Logging off, no Zaraz or Workers, Browser
+   Integrity Check and Security Level off for the API hostnames, WAF rules on Block,
+   rule 0 not logging. The node and cloudflared log levels are in the SDL and checked
+   by `build-sdl.py`.
 
 **Disk.** The node keeps everything (`pruning=nothing`, every block's results) on a
 200Gi volume that only grows, and Akash cannot grow a volume in place: a bigger disk
@@ -260,15 +273,26 @@ grant history.
 
        bin/create.py <tag> --provider <ADX provider>
 
-   `GAS_WALLET_MNEMONIC` (the new wallet's, written 2026-10-04) is injected from the
-   backend's `.env`.
+   `GAS_WALLET_MNEMONIC` (the new wallet's, written 2026-10-04) and
+   `CHAIN_EDGE_TOKEN` (section 3.4) are injected from the backend's `.env`; the
+   backend's `build-sdl.py` refuses to build without the token.
 4. **`api.erth.network`**: one connector per tunnel. Close the old lease
    `1790918719150` as soon as the new one serves, or the two connectors split
    requests.
-5. **Exempt the backend's egress at Cloudflare.** Read the new lease's egress address
-   and put it in the `earth_backend_egress` IP list (akash/README.md, "Exempting the
-   backend"). Rules 2 and 3 refer to the list; without the entry a registration
-   burst rate-limits the backend and its grants come back `202 pending`.
+5. **The backend passes Cloudflare by its token, not its address.** Nothing to do per
+   lease: rule 0 matches the `CHAIN_EDGE_TOKEN` header wherever the backend runs. If
+   the startup log says `CHAIN_EDGE_TOKEN is unset`, or grants fail with gas-check
+   unavailable (`403` from `rpc.erth.network`), the token in `.env` and in rule 0
+   differ.
+6. **Purge the circuit cache once.** Backends before this release served
+   `/circuits/<variant>.json.gz` as `immutable` for a year, and all 17 circuits
+   changed under those names, so a Cloudflare colo may still hold an old build.
+   **Caching → Configuration → Purge Cache → Custom Purge**: by prefix
+   `api.erth.network/circuits/` where the plan offers it, otherwise by URL, the 17
+   listed by `sed 's|.*  \(.*\)\.json$|https://api.erth.network/circuits/\1.json.gz|'
+   circuits/SHA256SUMS` in the backend repo. From now on the plain names are cached for 5 minutes
+   and the content-addressed names (`<variant>.<sha256>.json.gz`) never change, so
+   later circuit changes need no purge.
 
 **Check:** `/health` answers (its `grants_remaining` is 0 until section 6),
 `/opt/earthd/bin/earthd version` in the container prints the launch tag, and after
