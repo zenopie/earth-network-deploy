@@ -2,8 +2,12 @@
 #
 # Deploy a released tag to the Akash lease, in place.
 #
-#   bin/deploy.sh v0.4.5           update the running deployment
-#   bin/deploy.sh v0.4.5 --print   build the SDL and show it, submit nothing
+#   FLAGS="--fullnode --no-statesync --validator-key --node-key --tunnel"
+#   bin/deploy.sh <tag> $FLAGS           update the running deployment
+#   bin/deploy.sh <tag> $FLAGS --print   build the SDL and show it, submit nothing
+#
+# The flags are the ones the lease was created with (RELAUNCH.md, section 3).
+# Leaving one out drops a secret the node needs, or is refused.
 #
 # In place means the volumes survive, so the chain keeps its height and history.
 # Only image and env changes can go this way: endpoint kinds and resources are
@@ -15,11 +19,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="${1:?usage: deploy.sh <tag> [--print] [--sdl <path>] [--dseq <n>] [--fullnode] [--validator-key] [--node-key] [--tunnel] [--no-statesync]}"
 shift
 
-# There are two leases during the sync migration, and PUTting the wrong SDL at
-# the wrong one is how this goes badly: the live validator's SDL carries the
-# consensus key, the sync node's must not until the swap. Both are named
-# explicitly rather than defaulted, so a mistake has to be typed rather than
-# inherited from .env.
+# The SDL's flags are typed on every call rather than defaulted, so an SDL
+# carrying the consensus key is never sent to a lease by accident. --dseq
+# overrides DSEQ from .env for a lease other than the validator.
 MODE=""; SDL_FILE="akash/deploy.yaml"; TARGET_DSEQ=""; BUILD_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in

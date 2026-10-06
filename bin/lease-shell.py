@@ -25,7 +25,7 @@ spec.loader.exec_module(ll)
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--service", default="node")
-    ap.add_argument("--dseq", help="lease to target; defaults to DSEQ in .env. Since the sync migration there are two leases, and SYNC_DSEQ is the new one.")
+    ap.add_argument("--dseq", help="lease to target; defaults to DSEQ in .env")
     ap.add_argument("--pod", type=int, default=0)
     ap.add_argument("cmd", nargs=argparse.REMAINDER,
                     help="command to run, after a bare --")

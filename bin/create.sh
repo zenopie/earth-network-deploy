@@ -2,10 +2,14 @@
 #
 # Create a NEW lease for the node, and print the DSEQ it got.
 #
-#   bin/create.sh v0.4.10                      pick the cheapest bid, ask first
-#   bin/create.sh v0.4.10 --provider akash1..  take that provider's bid
-#   bin/create.sh v0.4.10 --yes                do not ask
-#   bin/create.sh v0.4.10 --sdl-only           build and validate the SDL, send nothing
+#   FLAGS="--fullnode --no-statesync --validator-key --node-key --tunnel"
+#   bin/create.sh <tag> $FLAGS --var DSEQ                   cheapest bid, ask first
+#   bin/create.sh <tag> $FLAGS --var DSEQ --provider akash1..  that provider's bid
+#   bin/create.sh <tag> $FLAGS --var DSEQ --yes             do not ask
+#   bin/create.sh <tag> $FLAGS --sdl-only                   build and validate, send nothing
+#
+# The flags are the validator's (RELAUNCH.md, section 3); build-sdl.py refuses
+# a build without --fullnode.
 #
 # This is NOT deploy.sh. deploy.sh updates a running deployment in place with
 # PUT, which keeps the volumes and therefore the chain's height and history.
@@ -38,7 +42,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API=https://console-api.akash.network/v1
 
-TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--var NAME]}"
+TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--fullnode] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--var NAME]}"
 shift
 
 PROVIDER=""; DEPOSIT=5; ASSUME_YES=0; SDL_ONLY=0; SDL_FILE="akash/deploy.yaml"; FULLNODE=0
@@ -60,21 +64,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# --fullnode creates a SECOND lease alongside the live one, for a node that
-# syncs rather than signs. Two things follow from that, both load bearing:
+# --fullnode keeps the mnemonics out of the SDL (see build-sdl.py). It also
+# decides where the new DSEQ is written in .env, a leftover of the 2026-09-01
+# lease migration, when a --fullnode lease was a SECOND node next to a live
+# validator:
 #
-#   - build-sdl.py is told to strip every signing identity (see its --fullnode).
-#   - DSEQ in .env is NOT overwritten. It is the handle every other tool here
-#     uses -- deploy.sh, lease-logs.py, lease-shell.py -- and repointing it at
-#     the new node mid-migration would aim them all at the wrong lease while
-#     the live validator is the one that needs watching. The new number is
-#     written as SYNC_DSEQ instead.
-#
-# --var names the .env variable the new DSEQ is written to. It exists because
-# SYNC_DSEQ is no longer free: after the 2026-09-01 migration it points at the
-# LIVE VALIDATOR, so a third lease that defaulted to it would silently repoint
-# deploy.sh, lease-logs.py and lease-shell.py at the wrong node while the
-# validator is the one that needs watching.
+#   - without --fullnode, DSEQ (but build-sdl.py now refuses that build);
+#   - with --fullnode, SYNC_DSEQ, which nothing here reads, so DSEQ -- the
+#     handle deploy.sh, lease-logs.py and lease-shell.py use -- keeps pointing
+#     at the previous lease;
+#   - with --var NAME, NAME. The validator is created with --var DSEQ
+#     (RELAUNCH.md, section 3), which is right whenever no other lease is live.
 BUILD_ARGS=()
 if [ "$FULLNODE" = 1 ]; then
   BUILD_ARGS+=(--fullnode)

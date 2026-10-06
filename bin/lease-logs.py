@@ -157,7 +157,7 @@ def main():
     ap.add_argument("--service", help="container name prefix, e.g. node / relayer / cloudflared")
     ap.add_argument("--tail", type=int, default=100)
     ap.add_argument("--follow", action="store_true")
-    ap.add_argument("--dseq", help="lease to target; defaults to DSEQ in .env. Since the sync migration there are two leases, and SYNC_DSEQ is the new one.")
+    ap.add_argument("--dseq", help="lease to target; defaults to DSEQ in .env")
     ap.add_argument("--events", action="store_true", help="kubernetes events instead of logs")
     args = ap.parse_args()
 
