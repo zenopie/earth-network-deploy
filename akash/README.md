@@ -91,28 +91,120 @@ unbounded), `EARTHD_RPC_MAX_OPEN_CONNECTIONS=100`,
 `EARTHD_RPC_UNSAFE=false`. These are env, so changing one is an in-place PUT.
 
 **At Cloudflare** (zone `erth.network`, Security → WAF), set before launch. What
-the clients use decides the rules: the backend indexer reads `/status`,
-`/blockchain`, `/block_results` and `/abci_query` (never with `prove`); the apps'
-explorer reads `/cosmos/tx/v1beta1/txs?query=…`; nothing calls `tx_search`,
-`block_search` or subscribes.
+the clients use decides the rules:
 
-1. Custom rule, **Block**: host `rpc.erth.network` and URI path in `/tx_search`,
-   `/block_search`, `/unconfirmed_txs`, `/dial_seeds`, `/dial_peers`, or a path
-   starting `/unsafe`; or the query string contains `prove=true`. On a plan with
-   request-body fields, also block a POST whose body contains `"tx_search"`,
-   `"block_search"` or `"prove":true` (CosmJS sends JSON-RPC as POST to `/`).
-2. Rate limit, per IP: host `lcd.erth.network` and path starting
-   `/cosmos/tx/v1beta1/txs` with method GET (tx search; with `tx.height>0` and
-   `ORDER_BY_DESC` it scans the whole index): 20 requests per minute, then block for
-   10 minutes.
-3. Rate limit, per IP: host `lcd.erth.network` or `rpc.erth.network`, everything:
-   600 requests per minute, then block for 1 minute. A re-index from height 1 runs
-   faster than that: add a skip rule for the backend lease's egress IP while it
-   catches up, and remove it after.
+- The backend indexer reads `/status`, `/blockchain`, `/block_results` and
+  `/abci_query` (never with `prove`, never a `cosmos.tx.v1beta1.Service` path).
+- Every client polls `GET /cosmos/tx/v1beta1/txs/{hash}` to learn whether its tx
+  landed: iOS `EarthClient.awaitCommit` and `PrivacyChain`, Android `PrivacyChain`
+  (20 polls at 800 ms), the web app (`src/chain/tx.js`, `explorer.js`), and the
+  backend's cosmpy `wait_to_complete` after every gas grant. That is a point read by
+  hash and must never be rate limited by the search rule.
+- Broadcasts are `POST /cosmos/tx/v1beta1/txs` (no query string); they go through
+  the node's mempool checks, not the tx index.
+- Only the explorer searches: `GET /cosmos/tx/v1beta1/txs?query=…` (older SDKs:
+  `?events=…`). With `tx.height>0` and `ORDER_BY_DESC` that scans the whole tx index.
+- Nothing calls `tx_search` or `block_search`, or subscribes.
+
+**Exempting the backend.** The backend reaches both hostnames through Cloudflare from
+its Akash provider's egress address, which it may share with the provider's other
+tenants. Find it from inside the backend lease (the image has python, not curl):
+
+    bin/lease-shell.py --dseq <backend DSEQ> --service app -- python -c \
+      "import urllib.request as u; print(u.urlopen('https://www.cloudflare.com/cdn-cgi/trace').read().decode())" \
+      | grep '^ip='
+
+Run it twice a few minutes apart (a provider with several egress addresses shows
+more than one) and put every address in a Cloudflare IP list, **Manage Account →
+Configurations → Lists**, named `earth_backend_egress` (an IPv6 egress goes in as
+its /64). The rules below refer to `$earth_backend_egress`, so a new backend lease
+or provider means editing the list, not the rules: re-run the check after every
+backend `create.sh`. The cost: the provider's other tenants on the same address are
+also exempt from rules 2 and 3. Rule 1 still applies to them, and the node-side
+limits above still hold.
+
+Rules (Expression Editor syntax; paste each into "Edit expression"):
+
+1. Custom rule, action **Block**:
+
+       (http.host eq "rpc.erth.network" and (
+          http.request.uri.path in {"/tx_search" "/block_search" "/unconfirmed_txs" "/dial_seeds" "/dial_peers"}
+          or starts_with(http.request.uri.path, "/unsafe")
+          or http.request.uri.query contains "prove=true"
+          or http.request.uri.query contains "cosmos.tx.v1beta1.Service"))
+
+   The endpoints that scan an index or touch the peer set, and `prove=true` (a
+   Merkle proof per query). `cosmos.tx.v1beta1.Service` closes the side door:
+   `/abci_query?path="/cosmos.tx.v1beta1.Service/GetTxsEvent"` runs the same tx
+   search as the LCD, through the app's gRPC query router. On a plan with
+   request-body fields, add `or http.request.body.raw contains "tx_search"` (and
+   the same for `"block_search"`, `"prove":true` and `cosmos.tx.v1beta1.Service`):
+   CosmJS sends JSON-RPC as a POST to `/`.
+
+2. Rate limiting rule, **tx search only**, characteristic IP:
+
+       (http.host eq "lcd.erth.network"
+        and http.request.method eq "GET"
+        and http.request.uri.path eq "/cosmos/tx/v1beta1/txs"
+        and any(http.request.uri.args.names[*] in {"query" "events"})
+        and not ip.src in $earth_backend_egress)
+
+   120 requests per 1 minute, then block for 1 minute.
+   - `path eq`, not "starts with": `/cosmos/tx/v1beta1/txs/{hash}` is a different
+     path and never matches. Neither does the broadcast, which is a POST.
+   - `args.names` matches the parameter *name* exactly, so `?xquery=` or a hash
+     containing "query" cannot trip it, and a search cannot dodge it by reordering
+     parameters. If the dashboard refuses `http.request.uri.args.names` on your plan,
+     use `(http.request.uri.query contains "query=" or http.request.uri.query contains
+     "events=")`. That is stricter (it can match more), never looser.
+   - Cloudflare's URL normalization (Rules → Settings → "Normalize incoming URLs",
+     on by default) must stay on, or `/cosmos/tx/v1beta1//txs` or a percent-encoded
+     path would slip past `eq` while the gRPC gateway still routes it.
+   - Sizing: an explorer page view makes 1 to 3 searches. Behind carrier NAT one IPv4
+     address fronts many phones, so a per-IP limit is a limit on a whole carrier
+     block. 120 per minute is about 40 to 120 explorer views a minute from one
+     address, far above what one person does, and a 1-minute block (not 10) means a
+     carrier-NAT neighbour who trips it loses search for a minute, not ten. What it
+     stops is one address scanning in a loop; the node's query-gas limit bounds each
+     scan.
+
+3. Rate limiting rule, **everything else**, characteristic IP:
+
+       ((http.host eq "lcd.erth.network" or http.host eq "rpc.erth.network")
+        and not ip.src in $earth_backend_egress)
+
+   1,200 requests per 1 minute, then block for 1 minute.
+   - It covers commit polls and broadcasts, which are cheap: a commit poll is a
+     point read, and a phone that sends a tx polls at most 20 times. 1,200 a minute
+     is 60 phones each sending a tx and polling to the limit in the same minute
+     from one carrier address, with room left for their syncs.
+   - The backend is exempt because it is one address doing the work of every user:
+     a gas grant is a broadcast plus up to a dozen polls, and a re-index from
+     height 1 reads every block. Without the exemption a launch-day burst would
+     block the backend and every grant after it would come back `202 pending`
+     (landed, but unconfirmable) until the block lifted.
+   - It is a flood stop, not capacity planning; the node-side limits
+     (`EARTHD_API_MAX_OPEN_CONNECTIONS`, `EARTHD_RPC_MAX_OPEN_CONNECTIONS`, query
+     gas) are what bound the load on the signer.
+
 4. No caching rule: heights move, and a cached `/status` would stall the indexer.
 
-Check from outside: `curl -s 'https://rpc.erth.network/tx_search?query="tx.height=1"'`
-is blocked (403), and `/status` still answers.
+Plan limits: the Free plan allows one rate limiting rule with a 10-second period.
+Rules 2 and 3 as written need a plan with two rules and 1-minute periods (Pro or
+above). On Free, keep rule 3 only, as 200 requests per 10 seconds with a 10-second
+block, and rely on rule 1 plus the node's query-gas limit for search.
+
+Check from outside (from an address not in the list):
+
+- `curl -s -o /dev/null -w '%{http_code}\n' 'https://rpc.erth.network/tx_search?query="tx.height=1"'`
+  prints 403, and `/status` still answers.
+- `for i in $(seq 1 150); do curl -s -o /dev/null -w '%{http_code}\n' https://lcd.erth.network/cosmos/tx/v1beta1/txs/<a real tx hash>; done | sort | uniq -c`
+  shows only 200: by-hash lookups are not limited by rule 2.
+- The same loop on `'/cosmos/tx/v1beta1/txs?query=tx.height%3D1&pagination.limit=1'`
+  turns to 429 after 120. Wait a minute before testing anything else from that
+  address.
+- From the backend lease (same `lease-shell.py` call, a python loop of 1,300 by-hash
+  GETs), every status is 200.
 
 ## Addresses
 

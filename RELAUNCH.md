@@ -166,8 +166,10 @@ chain tunnel (one token, one live connector).
    - the 26656 host:port from the lease status. Record it for `EXTERNAL_ADDRESS` and
      the docs' P2P address.
 4. **Cloudflare rules for `rpc.*` and `lcd.*`** (akash/README.md, "Public RPC and LCD
-   limits"): the block rule and both rate limits, in place before `genesis_time`. The
-   node-side limits are already in the SDL (`limits:` line of the dry run).
+   limits"): the block rule, the `earth_backend_egress` IP list (empty until
+   section 4.5), and both rate limits (search only on the exact path
+   `/cosmos/tx/v1beta1/txs` with `query`/`events`; by-hash lookups never), in place
+   before `genesis_time`. The node-side limits are already in the SDL (`limits:` line of the dry run).
 5. **Cloudflare no-logs settings** (NO_LOGS.md, "Cloudflare settings"): no Logpush
    job, Web Analytics and Network Error Logging off, no Zaraz or Workers, WAF rules on
    Block. The node and cloudflared log levels are in the SDL and checked by
@@ -216,6 +218,10 @@ grant history.
 4. **`api.erth.network`**: one connector per tunnel. Close the old lease
    `1790918719150` as soon as the new one serves, or the two connectors split
    requests.
+5. **Exempt the backend's egress at Cloudflare.** Read the new lease's egress address
+   and put it in the `earth_backend_egress` IP list (akash/README.md, "Exempting the
+   backend"). Rules 2 and 3 refer to the list; without the entry a registration
+   burst rate-limits the backend and its grants come back `202 pending`.
 
 **Check:** `/health` answers (its `grants_remaining` is 0 until section 6),
 `/opt/earthd/bin/earthd version` in the container prints the launch tag, and after
