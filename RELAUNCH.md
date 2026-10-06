@@ -222,7 +222,9 @@ grant history.
        curl -fsSL https://github.com/zenopie/earth-network-chain/releases/download/<tag>/checksums.txt \
          | grep linux_amd64.tar.gz
 
-   The image refuses to build on `v1.0.0` (or any `v0.*`): those cannot check the
+   The image refuses to build on any `v0.*` (by name) or the never-run `v1.0.0` build
+   (by its tarball's sha256 `16842a45…`, so a launch release re-cut under the tag
+   `v1.0.0` is not blocked; a new tag name is still clearer): those cannot check the
    relaunch `MsgRegister`, so until this bump no backend release can be tagged. Commit,
    tag the backend release, and let CI build it.
 2. **SDL** (`deploy/akash/deploy.yaml`): `EARTH_CHAIN_ID=earth-1`,
