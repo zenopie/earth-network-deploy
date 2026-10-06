@@ -14,7 +14,7 @@ Run the steps in order. Each **Check** must pass before the next step.
 | --- | --- |
 | Chain id | `earth-1`, kept. Nothing from any earlier earth-1 carries over. |
 | Chain | Nothing running. The last earth-1 lease (`1790678074849`) closed on 2026-10-01, and the v1.0.0 staging lease (`1790917587362`) closed before its genesis on 2026-10-02. v1.0.0 never ran. |
-| Validator operator account | `earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr`, made 2026-10-04 by `bin/rotate-launch-keys.sh` (in the main checkout, uncommitted). Its mnemonic is `VALIDATOR_MNEMONIC` in this repo's `.env`. It replaces `earth14e6sqtf5y7mtzwykqreewe9kg3w94t0f25d54a`. |
+| Validator operator account | `earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr`, made 2026-10-04 by `bin/rotate-launch-keys.sh` (do not re-run it: it replaces this key). Its mnemonic is `VALIDATOR_MNEMONIC` in this repo's `.env`. It replaces `earth14e6sqtf5y7mtzwykqreewe9kg3w94t0f25d54a`. |
 | Consensus key | `PRIV_VALIDATOR_KEY_B64` in `.env`, pubkey `PGqvPN4CxEkxvvh3tSBX0SGeBgjMdqQwZkdHt8FRLm4=`. Generated 2026-10-02 and never signed a block, so it is safe to use. The old chain's key (`90603989…`) must never sign again: its public signatures at the same heights under the same chain id would be double-sign evidence. |
 | Node key | `NODE_KEY_B64` in `.env`; fixes the node id joiners dial. |
 | Gas wallet | `earth13ysugyz4la7kfrmgsfdhk203ujt0jgcpw2avmg`. Its mnemonic is `GAS_WALLET_MNEMONIC` in the backend repo's `.env`. It is not in genesis; the validator funds it after launch (section 6). |
@@ -64,35 +64,39 @@ builds are live and when you have hours free to watch the launch. Emission and t
 burn are prorated from `genesis_time`, so a time already past pays the whole gap out at
 height 2.
 
-1. **Accounts** (`networks/genesis/accounts.json`):
-   - the genesis validator's entry names `earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr`
-     (1,000 ERTH), replacing `earth14e6sqtf5y7mtzwykqreewe9kg3w94t0f25d54a`;
-   - **remove the devnet accounts**: the faucet `earth1s7rgscltvw8v3kzhj46pptdqg843ngs7th9ywp`
-     and the old gas wallet `earth1jtc2zjmmmyttdayz6aw8vfgt5qn4hg7rpxaar6`. Both keys have
-     been on a laptop. Only the validator and the module accounts hold anything at
-     height 1.
-2. **`genesis_time`** in `networks/genesis/chain.json`.
-3. **The gentx**, with `scripts/ceremony-gentx.sh`, run on the operator's machine with
-   the operator mnemonic in the environment (never echoed):
+1. **Read the key facts off the `.env`**, sending nothing (no tag needed; the image
+   line stays the committed placeholder):
 
-       VALIDATOR_MNEMONIC="$(…from .env…)" ./scripts/ceremony-gentx.sh \
-         --pubkey '{"@type":"/cosmos.crypto.ed25519.PubKey","key":"PGqvPN4CxEkxvvh3tSBX0SGeBgjMdqQwZkdHt8FRLm4="}'
+       python3 bin/build-sdl.py . /dev/null --fullnode --no-statesync \
+         --validator-key --node-key --tunnel
 
-   `--pubkey` makes the gentx name the `.env` consensus key, and no new private key is
-   written. First confirm that pubkey is the one in `PRIV_VALIDATOR_KEY_B64`: decode
-   that value and print only its `pub_key`.
+   It prints the `node id` (from `NODE_KEY_B64`) and the consensus address and pubkey
+   (from `PRIV_VALIDATOR_KEY_B64`). The pubkey must be `PGqvPN4C…`.
+2. **Run the ceremony** in the chain repo, on the operator's machine:
 
-   **The script will refuse this as it stands.** It requires the gentx's operator to
-   equal the placeholder gentx's (`earthvaloper14e6s…`), and it refuses a consensus key
-   equal to the placeholder's (which already is `PGqvPN4C…`). Both refusals were right
-   for the 2026-10-02 ceremony and are wrong for this one. Before the ceremony, the
-   chain repo has to let the operator change (to the account in `accounts.json`) and
-   accept a key that matches the placeholder's. The guard that still matters is that the
-   pubkey is not the old chain key `90603989…`. Self-delegation (100 ERTH), commission
-   and moniker are read from the placeholder; the moniker is still `earth-akash-devnet`,
-   so rename it if you want.
-4. `make genesis && make genesis-check`, then `go test ./networks/... ./deploy/...`.
-5. Confirm in `networks/genesis.json`:
+       scripts/ceremony.sh --genesis-time <RFC3339, UTC> \
+         --pubkey '{"@type":"/cosmos.crypto.ed25519.PubKey","key":"PGqvPN4CxEkxvvh3tSBX0SGeBgjMdqQwZkdHt8FRLm4="}' \
+         --memo-peer <node id>@<host>:26656 --moniker <name>
+
+   It reads only the `VALIDATOR_MNEMONIC` line of this repo's `.env` (`--env-file`,
+   else `$EARTH_DEPLOY_ENV`, else `../earth-network-deploy/.env` beside the chain
+   checkout), never prints it, and refuses a mnemonic that is not
+   `earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr`. All or nothing, it:
+   - swaps the placeholder validator `earth14e6sqtf5y7mtzwykqreewe9kg3w94t0f25d54a`
+     for the operator (same 1,000 ERTH) in `networks/genesis/accounts.json`, and
+     removes the devnet faucet `earth1s7rgs…` and the old gas wallet `earth1jtc2z…`;
+   - writes `genesis_time` (refused unless in the future) to `chain.json`;
+   - signs a new gentx with `--pubkey` (no private consensus key is written), keeping
+     the placeholder's self-delegation (100 ERTH) and commission. A key that signed an
+     earlier earth-1 (`kTMzo…`, consensus address `90603989…`) is refused;
+   - rebuilds the genesis (`scripts/build-genesis.sh`, then `--check`) and runs the
+     genesis tests with `EARTH_REQUIRE_CEREMONY=1`, then prints the sha256.
+
+   Pass `--memo-peer` and `--moniker`: the defaults are the placeholder's
+   `4284b363…@192.168.0.2:26656` (a LAN address) and `earth-akash-devnet`. The memo is
+   informational; the lease's host:port is not known yet, so a planned hostname is
+   fine.
+3. Confirm in `networks/genesis.json`:
    - `chain_id` `earth-1`, `genesis_time` as chosen, one gentx: operator
      `earthvaloper1…` of `earth1n6amv…`, pubkey `PGqvPN4C…`;
    - no balance but the validator's and the module accounts';
@@ -100,11 +104,11 @@ height 2.
      replay);
    - every verifying key (register, action, membership, stake, vote) matches the
      store builds.
-6. Commit the sources and the rebuilt genesis. **Tag the launch release** from that
+4. Commit the sources and the rebuilt genesis. **Tag the launch release** from that
    commit: binaries (`linux/amd64`, `linux/arm64`), `checksums.txt`, `genesis.json`, and
    the image on ghcr. The image's baked `/etc/earth/genesis.json` is what every node
-   installs.
-7. **In this repo**: write the genesis sha256 into `akash/genesis.sha256` and commit.
+   installs. **In this repo**, write the printed sha256 into `akash/genesis.sha256`
+   and commit.
 
 **Check:**
 
