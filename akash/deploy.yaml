@@ -19,10 +19,11 @@
 # with `--fullnode --no-statesync --validator-key --node-key --tunnel` (see
 # RELAUNCH.md, section 3):
 #
-#   --fullnode       keeps VALIDATOR_MNEMONIC and RELAYER_MNEMONIC out of the
-#                    SDL. DEV_INIT=0 creates no account, so the node needs no
-#                    mnemonic; keeping it off this lease is why governance
-#                    transactions are signed from the operator's machine.
+#   --fullnode       keeps VALIDATOR_MNEMONIC out of the SDL. DEV_INIT=0
+#                    creates no account, so the node needs no mnemonic;
+#                    keeping it off this lease is why governance transactions
+#                    are signed from the operator's machine. RELAYER_MNEMONIC
+#                    goes in only with --relayer (and ENABLED=true).
 #   --no-statesync   this node HAS the history; state sync would floor it.
 #   --validator-key  injects PRIV_VALIDATOR_KEY_B64. This is the one secret that
 #                    can double-sign.
@@ -431,7 +432,7 @@ services:
       # RELAYER_MNEMONIC is NOT set here. Everything in this file reaches the
       # provider, and while this key only pays gas, a mnemonic in a public repo
       # is a mnemonic on the internet. Inject it at deploy time like
-      # TUNNEL_TOKEN.
+      # TUNNEL_TOKEN, with --relayer (bin/build-sdl.py).
     expose: []
 
   cloudflared:

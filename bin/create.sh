@@ -42,7 +42,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API=https://console-api.akash.network/v1
 
-TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--fullnode] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--var NAME]}"
+TAG="${1:?usage: create.sh <tag> [--provider <addr>] [--deposit <akt>] [--yes] [--sdl-only] [--fullnode] [--no-statesync] [--validator-key] [--node-key] [--tunnel] [--relayer] [--var NAME]}"
 shift
 
 PROVIDER=""; DEPOSIT=5; ASSUME_YES=0; SDL_ONLY=0; SDL_FILE="akash/deploy.yaml"; FULLNODE=0
@@ -59,6 +59,7 @@ while [ $# -gt 0 ]; do
     --validator-key) VALIDATOR_KEY=1; shift ;;
     --tunnel)   TUNNEL=1; shift ;;
     --node-key) NODE_KEY=1; shift ;;
+    --relayer)  RELAYER=1; shift ;;
     --var)      DSEQ_VAR="${2:?--var needs a name}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -97,6 +98,11 @@ fi
 # build-sdl.py.
 if [ "${NODE_KEY:-0}" = 1 ]; then
   BUILD_ARGS+=(--node-key)
+fi
+# --relayer: inject RELAYER_MNEMONIC; build-sdl.py refuses it unless the
+# relayer's ENABLED=true.
+if [ "${RELAYER:-0}" = 1 ]; then
+  BUILD_ARGS+=(--relayer)
 fi
 
 [ -f "$HERE/.env" ] || { echo "no .env — it holds the secrets injected into the submitted SDL" >&2; exit 1; }

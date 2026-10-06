@@ -16,7 +16,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TAG="${1:?usage: deploy.sh <tag> [--print] [--sdl <path>] [--dseq <n>] [--fullnode] [--validator-key] [--node-key] [--tunnel] [--no-statesync]}"
+TAG="${1:?usage: deploy.sh <tag> [--print] [--sdl <path>] [--dseq <n>] [--fullnode] [--validator-key] [--node-key] [--tunnel] [--no-statesync] [--relayer]}"
 shift
 
 # The SDL's flags are typed on every call rather than defaulted, so an SDL
@@ -33,6 +33,7 @@ while [ $# -gt 0 ]; do
     --no-statesync)   BUILD_ARGS+=(--no-statesync); shift ;;
     --tunnel)         BUILD_ARGS+=(--tunnel); shift ;;
     --node-key)       BUILD_ARGS+=(--node-key); shift ;;
+    --relayer)        BUILD_ARGS+=(--relayer); shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

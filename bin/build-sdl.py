@@ -37,6 +37,11 @@ ap.add_argument("--node-key", action="store_true",
                      "to dial, from its first boot. Only "
                      "with --validator-key: a second node carrying the same node "
                      "key is two peers claiming one id.")
+ap.add_argument("--relayer", action="store_true",
+                help="with --fullnode: inject RELAYER_MNEMONIC into the relayer "
+                     "service. Opt-in: refused unless the SDL sets the relayer's "
+                     "ENABLED=true, so the key never ships to a lease that does "
+                     "not run it.")
 ap.add_argument("--fullnode", action="store_true",
                 help="required. Keeps VALIDATOR_MNEMONIC and RELAYER_MNEMONIC out "
                      "of the SDL; with nothing else it builds a node with NO "
@@ -47,6 +52,7 @@ args = ap.parse_args()
 repo, out, digest, fullnode = args.repo, args.out, args.digest, args.fullnode
 want_valkey, want_tunnel = args.validator_key, args.tunnel
 want_nodekey = args.node_key
+want_relayer = args.relayer
 assert not want_nodekey or (fullnode and want_valkey), \
     "--node-key only applies with --fullnode --validator-key"
 
@@ -132,14 +138,15 @@ use_placeholder = fullnode and not want_tunnel
 s = s.replace(anchor, "    env:\n      - TUNNEL_TOKEN=%s\n"
               % (TUNNEL_PLACEHOLDER if use_placeholder else env["TUNNEL_TOKEN"]))
 
-# relayer: its key, only when the service is actually on. Injected the same way
-# and for the same reason as the other two — it reaches the provider either way,
-# what this avoids is it reaching a public repository.
-# Skipped for --fullnode: that node runs the relayer disabled, so the key would
-# be a secret shipped to a second provider for nothing. It pays gas and holds
-# nothing else, but "low value" is not a reason to spread it.
+# relayer: its key, only with --relayer (BD-9). Injected the same way and for
+# the same reason as the other two — it reaches the provider either way, what
+# this avoids is it reaching a public repository. Opt-in, and only when the
+# relayer is switched on (checked below): the key pays gas and holds nothing
+# else, but "low value" is not a reason to spread it.
 anchor = "      - LINK_ON_START="
-if anchor in s and not fullnode:
+if want_relayer:
+    assert anchor in s, "--relayer: no LINK_ON_START line to anchor RELAYER_MNEMONIC on"
+    assert env.get("RELAYER_MNEMONIC"), "--relayer: no RELAYER_MNEMONIC in .env"
     line = s[s.index(anchor):]
     line = line[:line.index("\n") + 1]
     s = s.replace(line, line + f"      - RELAYER_MNEMONIC={env['RELAYER_MNEMONIC']}\n")
@@ -212,9 +219,14 @@ if fullnode:
     assert "PERSISTENT_PEERS" in n, (
         "--fullnode with no PERSISTENT_PEERS key: set it, empty if this node is "
         "deliberately the only one on the network")
-    assert "RELAYER_MNEMONIC" not in r, (
-        "--fullnode built an SDL carrying RELAYER_MNEMONIC; the relayer is off "
-        "on this node and the key has no business reaching a second provider")
+    if want_relayer:
+        assert r.get("ENABLED") == "true", (
+            "--relayer with the relayer's ENABLED not true: the key would ship to "
+            "a lease that never uses it")
+    else:
+        assert "RELAYER_MNEMONIC" not in r, (
+            "SDL carries RELAYER_MNEMONIC without --relayer; the key has no "
+            "business reaching a provider that does not run the relayer")
 
 # An SDL with a <placeholder> left in it would boot a node that dials, or
 # advertises, nothing real. Fill it in or comment the line out.
