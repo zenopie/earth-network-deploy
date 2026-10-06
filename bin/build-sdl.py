@@ -252,6 +252,16 @@ for k, want in (("EARTHD_PRUNING", "nothing"),
                 # copy of data/ is what filled the last chain's disk and halted it.
                 ("UNSAFE_SKIP_BACKUP", "true")):
     assert n.get(k) == want, f"the full-history node needs {k}={want}, has {n.get(k)!r}"
+# BD-6: the public RPC/LCD is served by the only signer. Bound what one burst
+# of queries can take from consensus (per-IP limits are at Cloudflare).
+qgl = n.get("EARTHD_QUERY_GAS_LIMIT", "0")
+assert qgl.isdigit() and int(qgl) > 0, "EARTHD_QUERY_GAS_LIMIT must be set and > 0 (0 is unbounded)"
+for k, cap in (("EARTHD_RPC_MAX_OPEN_CONNECTIONS", 200),
+               ("EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS", 50),
+               ("EARTHD_API_MAX_OPEN_CONNECTIONS", 400)):
+    v = n.get(k, "")
+    assert v.isdigit() and 0 < int(v) <= cap, f"{k} must be set to 1..{cap}, has {v!r}"
+assert n.get("EARTHD_RPC_UNSAFE") == "false", "EARTHD_RPC_UNSAFE must be false"
 assert not n.get("STATESYNC_RPC_SERVERS"), (
     "STATESYNC_RPC_SERVERS set: state sync floors the node at its trust height "
     "and the indexer would have a permanent hole below it")
@@ -287,6 +297,10 @@ print("services:   ", ", ".join(sorted(svcs)))
 print("node image: ", img)
 print("DEV_INIT:   ", n["DEV_INIT"], " CHAIN_ID:", n["CHAIN_ID"], " MIN_GAS:", n.get("MIN_GAS_PRICES"),
       " mempool.max-txs:", n.get("EARTHD_MEMPOOL_MAX_TXS"))
+print("limits:       query_gas=%s rpc_conns=%s rpc_subs=%s api_conns=%s rpc_unsafe=%s" % (
+      n["EARTHD_QUERY_GAS_LIMIT"], n["EARTHD_RPC_MAX_OPEN_CONNECTIONS"],
+      n["EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS"], n["EARTHD_API_MAX_OPEN_CONNECTIONS"],
+      n["EARTHD_RPC_UNSAFE"]))
 print("history:      pruning=%s discard_abci_responses=%s tx_index=%s skip_backup=%s" % (
       n["EARTHD_PRUNING"], n["EARTHD_STORAGE_DISCARD_ABCI_RESPONSES"],
       n["EARTHD_TX_INDEX_INDEXER"], n["UNSAFE_SKIP_BACKUP"]))

@@ -231,6 +231,34 @@ services:
       # from the block producer; while one node is both, this is the trade.
       - API_UNSAFE_CORS=1
       #
+      # ---- public query limits (final audit BD-6) ----------------------------
+      #
+      # rpc.erth.network and lcd.erth.network are served by THIS process, the
+      # network's only signer. A flood of expensive queries competes with
+      # consensus for its 2 CPUs and its disk. These bound what one burst can
+      # take; the per-IP limits live at Cloudflare (akash/README.md, "Public RPC
+      # and LCD limits"). Read by earthd from EARTHD_-prefixed env, like the
+      # history settings above. bin/build-sdl.py refuses an SDL without them.
+      #
+      # app.toml query-gas-limit: gas cap for one gRPC/LCD/abci_query query (0,
+      # the SDK default, is unbounded). The largest legitimate query is the
+      # backend's 1,000-entry Query/Handles page, a few million gas; 50M leaves
+      # an order of magnitude over that and stops a query that walks a whole
+      # store at a historical height. Simulate is not affected. /store/ raw
+      # queries and tx search do not go through it (Cloudflare covers those).
+      - EARTHD_QUERY_GAS_LIMIT=50000000
+      # config.toml [rpc]: every client reaches 26657 through the one cloudflared
+      # connector, so this caps concurrent RPC requests (default 900).
+      - EARTHD_RPC_MAX_OPEN_CONNECTIONS=100
+      # Websocket subscribers, each also a broadcast_tx_commit in flight
+      # (default 100). No client of this chain subscribes.
+      - EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS=20
+      # The unsafe routes (dial_seeds, dial_peers, unsafe_flush_mempool, the
+      # profiler) stay off. false is the default; pinned.
+      - EARTHD_RPC_UNSAFE=false
+      # app.toml [api]: concurrent LCD connections (default 1000).
+      - EARTHD_API_MAX_OPEN_CONNECTIONS=200
+      #
       # No VALIDATOR_COINS / VALIDATOR_BONDED, on purpose: they were the
       # textual anchor the devnet build injected VALIDATOR_MNEMONIC after, so
       # without them this file cannot acquire the operator key by accident.

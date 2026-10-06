@@ -161,6 +161,9 @@ chain tunnel (one token, one live connector).
    - no `REQUIRE_NO_CONSENSUS_KEY` refusal (the validator does not set it);
    - the 26656 host:port from the lease status. Record it for `EXTERNAL_ADDRESS` and
      the docs' P2P address.
+4. **Cloudflare rules for `rpc.*` and `lcd.*`** (akash/README.md, "Public RPC and LCD
+   limits"): the block rule and both rate limits, in place before `genesis_time`. The
+   node-side limits are already in the SDL (`limits:` line of the dry run).
 
 **Disk.** The node keeps everything (`pruning=nothing`, every block's results) on a
 200Gi volume that only grows, and Akash cannot grow a volume in place: a bigger disk

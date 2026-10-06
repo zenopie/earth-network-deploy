@@ -72,6 +72,41 @@ Akash trial deployments auto-close after 24 hours, which is the same thing.
   the LCD from the browser. The SDK's LCD CORS is all-or-nothing; while one node is
   both validator and public LCD, this is the trade.
 
+## Public RPC and LCD limits
+
+`rpc.erth.network` and `lcd.erth.network` are served by the validator process, the
+network's only signer. Two layers keep a query flood from slowing block production.
+
+**On the node** (`akash/deploy.yaml`, refused by `build-sdl.py` when missing):
+`EARTHD_QUERY_GAS_LIMIT=50000000` (one gRPC/LCD/abci_query query; the SDK default is
+unbounded), `EARTHD_RPC_MAX_OPEN_CONNECTIONS=100`,
+`EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS=20`, `EARTHD_API_MAX_OPEN_CONNECTIONS=200`,
+`EARTHD_RPC_UNSAFE=false`. These are env, so changing one is an in-place PUT.
+
+**At Cloudflare** (zone `erth.network`, Security → WAF), set before launch. What
+the clients use decides the rules: the backend indexer reads `/status`,
+`/blockchain`, `/block_results` and `/abci_query` (never with `prove`); the apps'
+explorer reads `/cosmos/tx/v1beta1/txs?query=…`; nothing calls `tx_search`,
+`block_search` or subscribes.
+
+1. Custom rule, **Block**: host `rpc.erth.network` and URI path in `/tx_search`,
+   `/block_search`, `/unconfirmed_txs`, `/dial_seeds`, `/dial_peers`, or a path
+   starting `/unsafe`; or the query string contains `prove=true`. On a plan with
+   request-body fields, also block a POST whose body contains `"tx_search"`,
+   `"block_search"` or `"prove":true` (CosmJS sends JSON-RPC as POST to `/`).
+2. Rate limit, per IP: host `lcd.erth.network` and path starting
+   `/cosmos/tx/v1beta1/txs` with method GET (tx search; with `tx.height>0` and
+   `ORDER_BY_DESC` it scans the whole index): 20 requests per minute, then block for
+   10 minutes.
+3. Rate limit, per IP: host `lcd.erth.network` or `rpc.erth.network`, everything:
+   600 requests per minute, then block for 1 minute. A re-index from height 1 runs
+   faster than that: add a skip rule for the backend lease's egress IP while it
+   catches up, and remove it after.
+4. No caching rule: heights move, and a cached `/status` would stall the indexer.
+
+Check from outside: `curl -s 'https://rpc.erth.network/tx_search?query="tx.height=1"'`
+is blocked (403), and `/status` still answers.
+
 ## Addresses
 
 The node is reachable for clients **only through the tunnel**: `lcd.erth.network` and
