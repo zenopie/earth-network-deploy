@@ -16,7 +16,9 @@ tunnel.
 3. **Abuse limits stay in memory and expire.** The backend keeps per-client
    counters keyed by IPv4 address or IPv6 prefix, in memory only. A counter is
    dropped two windows after the client's last request (2 hours for `/gas/register`,
-   2 minutes for `/privacy` at the defaults) and on every restart. Counters never
+   2 minutes for `/privacy` at the defaults), within 10 seconds of that deadline
+   whether or not any later request arrives (a background sweep runs every 10 s),
+   and on every restart. Counters never
    hold anything else and are never written to disk.
 4. **One thing is stored about a registrant.** To pay each passport's gas grant
    once per 30 days, the backend stores `passport nullifier + day + grant kind +
@@ -30,8 +32,8 @@ tunnel.
 | Service | Setting | Enforced by |
 | --- | --- | --- |
 | Validator node | `EARTHD_LOG_LEVEL=*:info,rpc-server:error`. The node sees only the tunnel connector's address, never a client's, and does not log requests at info. `rpc-server` is held at error because at info it logs websocket remote addresses. | `bin/build-sdl.py` refuses `debug`/`trace` and requires `rpc-server:error` |
-| Validator and backend cloudflared | `--loglevel info`: connector state only. At debug, cloudflared logs every request's headers, `CF-Connecting-IP` included. | both repos' `build-sdl.py` refuse `debug`/`trace` |
-| Backend | uvicorn `--no-access-log --no-proxy-headers`. Gas-grant logs carry only a refusal kind or a coarse error with hex and long numbers removed. | `entrypoint.py`, `routers/gas.py` `_coarse`, `services/ratelimit.py` pruning |
+| Validator and backend cloudflared | `--loglevel info`: connector state, plus one `ERR` line per request the origin failed to answer (time, Cloudflare ray id, ingress rule, origin service; no client IP, path or headers). The ray id is Cloudflare's own request id, so with Cloudflare's records it names the request; on its own it is a timestamp. At debug, cloudflared logs every request's headers, `CF-Connecting-IP` included. | both repos' `build-sdl.py` refuse `debug`/`trace` |
+| Backend | uvicorn `--no-access-log --no-proxy-headers`. Gas-grant logs carry only a refusal kind or a coarse error with hex and long numbers removed. | `entrypoint.py`, `routers/gas.py` `_coarse`, `services/ratelimit.py` sweep (on a timer and on every call; `tests/test_ratelimit.py`) |
 | Web app | nginx `access_log off`, error log at `crit` | web repo `nginx.conf` |
 
 Peer-to-peer logs (port 26656) can name the addresses of other nodes that connect to
