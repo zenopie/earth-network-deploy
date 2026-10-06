@@ -252,8 +252,13 @@ services:
       # connector, so this caps concurrent RPC requests (default 900).
       - EARTHD_RPC_MAX_OPEN_CONNECTIONS=100
       # Websocket subscribers, each also a broadcast_tx_commit in flight
-      # (default 100). No client of this chain subscribes.
-      - EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS=20
+      # (default 100). 0 refuses every subscribe and broadcast_tx_commit
+      # (rpc/core/events.go, mempool.go: NumClients() >= max). No client of
+      # this chain subscribes: wallets, web app and backend poll by hash, the
+      # relayer (rly v2) polls, and Cloudflare blocks /websocket (README,
+      # rule 1). Keplr's own send screen subscribes for its "tx confirmed"
+      # notice; that notice does not appear, the send itself goes through.
+      - EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS=0
       # The unsafe routes (dial_seeds, dial_peers, unsafe_flush_mempool, the
       # profiler) stay off. false is the default; pinned.
       - EARTHD_RPC_UNSAFE=false

@@ -306,10 +306,14 @@ for k, want in (("EARTHD_PRUNING", "nothing"),
 qgl = n.get("EARTHD_QUERY_GAS_LIMIT", "0")
 assert qgl.isdigit() and int(qgl) > 0, "EARTHD_QUERY_GAS_LIMIT must be set and > 0 (0 is unbounded)"
 for k, cap in (("EARTHD_RPC_MAX_OPEN_CONNECTIONS", 200),
-               ("EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS", 50),
                ("EARTHD_API_MAX_OPEN_CONNECTIONS", 400)):
     v = n.get(k, "")
     assert v.isdigit() and 0 < int(v) <= cap, f"{k} must be set to 1..{cap}, has {v!r}"
+# R3-BD-1: no subscriptions at all. Nothing of ours subscribes, and a socket
+# is how tx_search got past Cloudflare's URI checks; Cloudflare now blocks
+# /websocket, and this is the node's own half of that.
+assert n.get("EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS") == "0", (
+    "EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS must be 0 (akash/README.md, rule 1)")
 assert n.get("EARTHD_RPC_UNSAFE") == "false", "EARTHD_RPC_UNSAFE must be false"
 assert not n.get("STATESYNC_RPC_SERVERS"), (
     "STATESYNC_RPC_SERVERS set: state sync floors the node at its trust height "
