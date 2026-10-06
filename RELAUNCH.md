@@ -185,14 +185,25 @@ A **new lease**, so the state volume is new: a fresh privacy index (the old one 
 to no running chain, and the indexer halts on a chain it does not know) and an empty
 grant history.
 
-1. **Release** with `EARTHD_VERSION` = the launch tag and `EARTHD_SHA256` = its
-   `linux_amd64` tarball's sha256 from `checksums.txt`.
+1. **Bump the earthd pin, then release.** The pin is the two `ARG` lines in the
+   backend `Dockerfile` and nothing else. Set `EARTHD_VERSION` to the launch tag and
+   `EARTHD_SHA256` to its `earthd_<tag>_linux_amd64.tar.gz` line in the tag's
+   `checksums.txt`:
+
+       curl -fsSL https://github.com/zenopie/earth-network-chain/releases/download/<tag>/checksums.txt \
+         | grep linux_amd64.tar.gz
+
+   The image refuses to build on `v1.0.0` (or any `v0.*`): those cannot check the
+   relaunch `MsgRegister`, so until this bump no backend release can be tagged. Commit,
+   tag the backend release, and let CI build it.
 2. **SDL** (`deploy/akash/deploy.yaml`): `EARTH_CHAIN_ID=earth-1`,
    `INDEXER_RPC_URL=https://rpc.erth.network:443` (CometBFT RPC on the validator),
    `INDEXER_START_HEIGHT=0`, `INDEX_DB=/app/state/privacy_index.db`. The indexer refuses
    a different chain id or block hash behind its RPC.
-3. **Create** on an ADX provider (`earthd gas-check` needs ADX too), never on the
-   validator's own provider (a hairpin to itself hangs):
+3. **Create** on an ADX provider (`earthd gas-check` needs ADX too). Sharing the
+   validator's provider is fine: the backend reaches the chain only through the
+   Cloudflare hostnames, never a provider hostname (that would hairpin inside the
+   provider's cluster and hang; the backend's `build-sdl.py` refuses one):
 
        bin/create.py <tag> --provider <ADX provider>
 
@@ -235,12 +246,19 @@ At `genesis_time`:
 2. Full history: `/block_results?height=1` answers.
 3. The indexer follows (`/privacy/status`).
 4. **Fund the gas wallet** from the validator's operator account, with transparent
-   ERTH, from the operator's machine. The validator holds 900 ERTH liquid at genesis
+   ERTH, from the operator's machine. Import the operator key there once, typing
+   `VALIDATOR_MNEMONIC` at the prompt (never into a file or a shell argument), and
+   check the address:
+
+       earthd keys add operator --recover --keyring-backend os
+       earthd keys show operator -a --keyring-backend os   # earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr
+
+    The validator holds 900 ERTH liquid at genesis
    (1,000 less the 100 self-bond); a private tx costs about 0.01 ERTH at 0.005uerth.
 
        earthd tx bank send earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr \
          earth13ysugyz4la7kfrmgsfdhk203ujt0jgcpw2avmg <amount>uerth \
-         --from <operator key> --chain-id earth-1 --node https://rpc.erth.network:443 \
+         --from operator --keyring-backend os --chain-id earth-1 --node https://rpc.erth.network:443 \
          --gas auto --gas-adjustment 1.5 --gas-prices 0.005uerth
 
    Then `earthd query tx <hash>`: code 0 there, not just at broadcast. The backend's
@@ -273,7 +291,6 @@ At `genesis_time`:
   `bin/deploy.sh <tag> --fullnode --no-statesync --validator-key --node-key --tunnel`.
 - `bin/lease-logs.py` and the disk check (section 3) on a schedule.
 - Run the web app's `npm run check:dex-live` against the live LCD.
-- Remove the attestation gas endpoints from the backend once no old app build is in use.
 - The IBC relayer: `akash/deploy.yaml` has the old path's ids commented out. Link anew
   with `LINK_ON_START=true` for one deploy, pin the new ids, put it back, and fund the
   relayer key on both chains (transparent ERTH here). Deploy with the validator's
@@ -281,7 +298,37 @@ At `genesis_time`:
 - Bump cosmovisor when a release contains cosmos-sdk #23720. Until then its upgrade
   detection can lose a race on a small node.
 
-## 8. Rollback
+## 8. Fixes before governance works
+
+Every governance proposal, software upgrades included, needs 2/3 of the human votes
+cast in the assembly as well as the stake vote (x/assembly). At launch no human is
+registered, so **no proposal can pass until registered humans vote YES**. Until then
+a consensus fix cannot go through `x/upgrade` and cosmovisor. It is a coordinated
+binary swap at a chosen height H, done by the operator (the one validator):
+
+1. **Gate the fix on height.** The new binary must behave exactly like the running one
+   below H and apply the change from H on (`ctx.BlockHeight() >= H`); a store
+   migration runs once, in the block at H. Test that it agrees with the running chain
+   below H: a scratch keyless full node (`--fullnode --no-statesync`, peered to the
+   validator) on the new binary must sync to the tip with no app-hash error.
+2. **Pick H** a few hours to a day ahead, tag the release, and announce H and the tag
+   in the docs for anyone running a node (a node still on the old binary at H stops
+   agreeing with the chain).
+3. **Swap while the pod is Ready**, before H: `bin/deploy.sh <newtag>` with the
+   validator's flags. The pod restarts on the new image; no upgrade has happened yet,
+   so cosmovisor has no `current` and runs the image binary. Check `earthd version`
+   and that blocks continue.
+4. **After H**, check the fix took effect. If it changes what `earthd gas-check`
+   accepts, bump the backend's earthd pin the same way (section 4.1).
+
+Why not a `halt-height` stop: with `EARTHD_HALT_HEIGHT=H` the node refuses block H
+and exits, the container crash-loops, and a PUT to a pod that is not Ready is accepted
+and never applied. The new image would then wait for the provider to delete pod
+`node-0`. Use a halt only if the fix cannot be height-gated, and only after the
+provider has agreed to delete the pod on request. Once humans are registered, use
+governance; then cosmovisor's `current` outranks the image.
+
+## 9. Rollback
 
 - **Before `genesis_time`**: nothing is irreversible. Close the new leases, fix, pick a
   **new** `genesis_time`, re-pin, re-tag, recreate.
@@ -289,12 +336,26 @@ At `genesis_time`:
   crash-looping pod cannot be fixed by a PUT. Either the provider deletes pod `node-0`,
   or close the lease and create a new one. Nothing is lost at height 1. Fix the genesis,
   set a new `genesis_time`, re-pin the sha, re-tag, and recreate.
-- **A wrong parameter after launch**: consensus changes go through governance, never an
-  in-place binary swap, and both houses must pass them. While only the operator holds
-  anything, a fresh genesis with a new `genesis_time` can be cheaper; ask first.
-- **Validator lease lost**: `.env` holds `PRIV_VALIDATOR_KEY_B64` and `NODE_KEY_B64`, so
-  a new lease can sign again. Before promoting any replacement, do the four checks from
-  the 2026-09-01 migration: `priv_validator_state.json` height and signbytes hash, the
-  new node at height 0, and a matching genesis sha256. Never run two nodes with the
-  consensus key. `--fullnode` does not remove a key already on a volume: a former
-  validator's volume signs from disk (that caused the 69-block fork on 2026-09-01).
+- **A wrong parameter after launch**: governance once humans can vote (both houses
+  must pass it), section 8 until then. While only the operator holds anything, a
+  fresh genesis with a new `genesis_time` can be cheaper; ask first.
+- **The validator's volume is lost** (the provider disappears or loses the disk, or
+  the lease closes on escrow or by mistake): **the chain is lost.** That volume is
+  the only copy of earth-1's state and blocks. There is no second node, no snapshot
+  off the lease (the state-sync snapshots live on the same volume), and the indexer
+  holds note and nullifier rows, not app state. A new lease is **not** a recovery:
+  with `.env`'s keys it would join the image genesis at height 0 and produce a
+  different chain under the same chain id, with every balance and registration gone.
+  - **Never sign heights 1.. again with `PGqvPN4C…` under `earth-1`.** The original
+    blocks at those heights carry that key's signatures; a second set is double-sign
+    evidence against the only validator, and it tells every wallet and the indexer
+    that history changed (the indexer halts on the block-hash mismatch). Starting
+    over means a new genesis, a new `genesis_time` and a **new consensus key** (add
+    `PGqvPN4C…` to the used-key lists in `bin/build-sdl.py` and the chain's
+    `scripts/ceremony.sh`), decided by a human, not a script.
+  - So protect the volume: keep the escrow funded, never close this lease, and check
+    the disk (section 3).
+- **Two nodes and the consensus key.** Never run two nodes holding the consensus key.
+  `--fullnode` does not remove a key already on a volume: a former validator's volume
+  signs from disk (that caused the 69-block fork on 2026-09-01); the entrypoint
+  refuses a keyless node whose volume holds a key it did not mint as a throwaway.

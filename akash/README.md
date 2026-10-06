@@ -50,8 +50,9 @@ rejects them with `over-utilized PORT endpoints`. Those need a close-and-recreat
 
 A PUT replaces the pod only when it is Ready. A crash-looping pod, or one sleeping
 until `genesis_time`, keeps running the old manifest: the PUT is accepted and
-`updated_replicas` stays 0. Recovery then needs the provider to delete pod `node-0`,
-or a new lease.
+`updated_replicas` stays 0. Recovery then needs the provider to delete pod `node-0`.
+After launch a new lease is not recovery: it is a new chain (RELAUNCH.md, section 9),
+so a fix to a running chain goes in while the pod is Ready (RELAUNCH.md, section 8).
 
 Akash trial deployments auto-close after 24 hours, which is the same thing.
 
