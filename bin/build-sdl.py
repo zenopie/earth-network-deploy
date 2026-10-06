@@ -346,6 +346,14 @@ for i, arg in enumerate(cmd):
     if arg in ("--loglevel", "--transport-loglevel") or arg.startswith(("--loglevel=", "--transport-loglevel=")):
         lvl = arg.split("=", 1)[1] if "=" in arg else (cmd[i + 1] if i + 1 < len(cmd) else "")
         assert lvl not in ("debug", "trace"), "cloudflared %s %s logs client requests" % (arg, lvl)
+    assert not (arg in ("--logfile", "--log-directory") or arg.startswith(("--logfile=", "--log-directory="))), (
+        "cloudflared %s writes logs to disk (NO_LOGS.md)" % arg)
+# cloudflared also reads each flag from a TUNNEL_* env var, which the command
+# checks above never see; the command is the one place these are set.
+for k in sorted(c):
+    assert k not in ("TUNNEL_LOGLEVEL", "TUNNEL_TRANSPORT_LOGLEVEL", "TUNNEL_LOGFILE", "TUNNEL_LOGDIRECTORY",
+                     "TUNNEL_METRICS"), (
+        "cloudflared env %s is refused: set it in command, where it is checked" % k)
 ll = n.get("EARTHD_LOG_LEVEL", "")
 assert ll, "EARTHD_LOG_LEVEL unset: pin it (NO_LOGS.md)"
 assert not any(w in ll for w in ("debug", "trace")), "EARTHD_LOG_LEVEL=%s logs client requests" % ll
