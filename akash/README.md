@@ -113,8 +113,10 @@ nothing else.
 
 To turn it on, set `ENABLED=true` and the counterparty (`COUNTERPARTY_CHAIN_ID`,
 `_RPC`, `_PREFIX`, `_GAS_PRICES`, and for Ethereum-style chains `_COIN_TYPE` and
-`_EXTRA_CODECS`; the committed values are Injective testnet's). `RELAYER_MNEMONIC` is
-injected from `.env`. Set `LINK_ON_START=true` for one deploy to create the client,
+`_EXTRA_CODECS`; the committed values are Injective testnet's). `RELAYER_MNEMONIC`
+comes from `.env`, but `build-sdl.py` injects it only without `--fullnode`, a build it
+now refuses: as things stand an `ENABLED=true` build fails on the missing mnemonic,
+and turning the relayer on needs `build-sdl.py` to inject it under `--fullnode`. Set `LINK_ON_START=true` for one deploy to create the client,
 connection and channel, then put it back: linking spends gas on both chains and a
 restart must not retry it. The config is written once into `/data/relayer`, so later
 env changes do nothing until that directory is cleared. A new genesis has no IBC

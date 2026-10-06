@@ -269,7 +269,8 @@ At `genesis_time`:
 - Remove the attestation gas endpoints from the backend once no old app build is in use.
 - The IBC relayer: `akash/deploy.yaml` has the old path's ids commented out. Link anew
   with `LINK_ON_START=true` for one deploy, pin the new ids, put it back, and fund the
-  relayer key with transparent ERTH on both chains.
+  relayer key on both chains (transparent ERTH here). First `build-sdl.py` has to
+  inject `RELAYER_MNEMONIC` under `--fullnode`; today it does not (akash/README.md).
 - Bump cosmovisor when a release contains cosmos-sdk #23720. Until then its upgrade
   detection can lose a race on a small node.
 
