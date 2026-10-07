@@ -272,16 +272,18 @@ ABCI mutex, so a consensus step waits behind at most four bounded calls; reads a
 broadcasts have separate slots, so a flood of `abci_query` cannot refuse wallet
 broadcasts (round-6 R6-E-3).
 
-**Answer ceilings** (round-6 R6-E-1, re-derived in round 8). A public answer to RPC
-`tx` is cut off past 22 MiB, LCD `txs/{hash}` past 25 MiB, `block_results` past
-32 MiB, the `tx.height=N` search past 46 MiB, RPC `block` past 9 MiB and LCD blocks
+**Answer ceilings** (round-6 R6-E-1, re-derived in rounds 8 and 9). A public answer to RPC
+`tx` is cut off past 22 MiB, LCD `txs/{hash}` past 35 MiB, `block_results` past
+32 MiB, the `tx.height=N` search past 86 MiB, RPC `block` past 9 MiB and LCD blocks
 past 18 MiB (declared larger: `502`; streamed past it: the connection is aborted). The
 backend has no ceiling. This is a backstop: the node has built the whole answer before
 the edge counts a byte. What bounds the build is the chain (chain `app/resultcap`),
 which counts a result's bytes at their worst-case JSON size (an escaped `<` is 6):
 
 - block `max_bytes` 4 MiB and `max_gas` 100M (genesis), and a default node admitting
-  txs of up to 1 MiB;
+  txs of up to 1 MiB. RPC and block answers carry txs as base64; the LCD's
+  `txs/{hash}` and search decode each tx to JSON and write it twice, its strings at up
+  to 6 bytes per byte (`\u003c` for `<`; `JSONEscapeBytes`, round-9 R9-D-1);
 - a tx with any msg that is not a relay msg: at most 1 MiB counted
   (`MaxTxResultBytes`), ~3.4 MB of JSON at worst, plus its ante events and a log cut
   to 1 KiB;
@@ -293,8 +295,12 @@ which counts a result's bytes at their worst-case JSON size (an escaped `<` is 6
   the tx, and a block's results up to ~21.5 MB (measured by the chain's
   `TestResultCapWorstCase`; no constant states it).
 
-Every ceiling is above the largest answer those allow, relay txs included, so
-nothing the chain can produce is cut. The single-tx and single-block ceilings are
+Every ceiling is above the largest answer those allow, relay txs included, so no
+result the chain can produce is cut, nor any tx whose JSON is within 6x its bytes.
+Not bounded per byte: the LCD writes every proto field, defaults included, so a tx
+built of empty nested messages renders past 6x (~18x measured for a tendermint
+header's empty validators). Only a tx built on purpose does that, and only its own
+answers and its block's search can be cut (aborted, never a short valid answer). The single-tx and single-block ceilings are
 computed in `edge/filter/forward.go` (the largest answer, a quarter more, rounded up
 to a MiB) from mirrors in `edge/filter/chaincaps.go`; `edge/conformance` reads the
 same numbers from the pinned chain's source and genesis, and fails on a mirror that

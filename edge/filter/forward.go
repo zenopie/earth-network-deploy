@@ -74,7 +74,11 @@ type fwdOpts struct {
 // checked against the pinned chain by edge/conformance):
 //
 //   - a block: max_bytes 4 MiB, evidence up to 1 MiB of it, max_gas 100M;
-//   - a tx: at most nodeMaxTxBytes (1 MiB, the only proposer's mempool);
+//   - a tx: at most nodeMaxTxBytes (1 MiB, the only proposer's mempool).
+//     RPC and block answers carry it as base64; the LCD's txs/{hash} and
+//     tx.height=N search decode it to JSON and write it twice, its strings
+//     at up to JSONEscapeBytes (6) per byte, a '<' being \u003c, a
+//     contract msg's raw JSON escaped the same way (audit R9-D-1);
 //   - a tx's result, counted at its worst-case JSON size (an escaped '<' is
 //     6, a msg response 2 per byte): MaxTxResultBytes (1 MiB) for a tx
 //     with any msg that is not a relay msg; for a relay tx (packet
@@ -82,18 +86,24 @@ type fwdOpts struct {
 //     anyone can send on their own channel) only gas, FreeBytes + gas /
 //     GasPerByte, ~5 MB at the block's gas. Plus its ante events (not
 //     counted; under txAnteBytes) and a log cut to MaxErrorBytes;
-//   - JSON structure is the one thing not counted: an answer is at most
+//   - a result's JSON structure is not counted: a result is at most
 //     JSONPerCountedByteX10/10 (3.3) times what was counted (one-byte keys,
 //     empty values).
 //
 // Each ceiling is the largest answer those allow, relay txs included (they
 // are legitimate answers), plus a quarter for what the estimate misses,
 // rounded up to a MiB. edge/conformance recomputes each from the pinned
-// chain's own numbers and fails if a ceiling is under it. No answer the
-// chain can produce is cut, then; the ceiling and shedding (shed.go) are
-// for the case where these numbers are wrong. What keeps heavy builds few
-// is the classes: an answer once seen heavy is served from the small bulk
-// class (shed.go).
+// chain's own numbers and fails if a ceiling is under it. So no result the
+// chain can produce is cut, and no tx whose JSON is within 6x its bytes.
+// One thing is not bounded per byte: the LCD writes every field, defaults
+// included, so a tx made of empty nested messages (a 2-4 byte proto entry
+// becoming an object of default fields; ~18x measured for a tendermint
+// header's empty validators) renders past 6x. Such a tx can only be built
+// on purpose and fails in DeliverTx; its own answers, and its block's
+// search, can be cut (fail-closed: a broken answer, never a short valid
+// one). The ceiling and shedding (shed.go) are otherwise for the case where
+// these numbers are wrong. What keeps heavy builds few is the classes: an
+// answer once seen heavy is served from the small bulk class (shed.go).
 const (
 	txAnteBytes    = 8 << 10 // a private tx's ante events, 6.5 KB at most (chain resultcap doc)
 	answerEnvelope = 64 << 10
@@ -105,8 +115,8 @@ const (
 	// RPC tx: the tx in base64 and the result: ~17.2 MiB, ceiling 22 MiB.
 	maxRespTx = (largestRPCTx*5/4 + 1<<20 - 1) >> 20 << 20
 	// LCD txs/{hash}: the tx twice (tx and tx_response.tx), decoded to JSON
-	// (counted at 2x its bytes each), and the result: ~19.9 MiB, ceiling
-	// 25 MiB.
+	// (at up to 6x its bytes each), and the result: ~27.9 MiB, ceiling
+	// 35 MiB.
 	maxRespTxLCD = (largestLCDTx*5/4 + 1<<20 - 1) >> 20 << 20
 	// RPC block: txs in base64 and evidence in JSON at up to 3x its proto
 	// size (votes with base64 signatures and hex hashes), sharing
@@ -122,13 +132,13 @@ const (
 	// bytes and gov.
 	maxRespBlockResults = 32 << 20
 	// LCD tx.height=N: at most 50 txs, each twice (txs and tx_responses)
-	// as JSON at 2x its bytes, within the block's bytes, and their results
-	// (block_results' worst): ~38 MB, ceiling 46 MiB.
-	maxRespSearch = ((4*chainBlockMaxBytes+blockResultsWorstJSON)*5/4 + 1<<20 - 1) >> 20 << 20
+	// as JSON at up to 6x its bytes, within the block's bytes, and their
+	// results (block_results' worst): ~68.5 MiB, ceiling 86 MiB.
+	maxRespSearch = ((2*chainJSONEscapeBytes*chainBlockMaxBytes+blockResultsWorstJSON)*5/4 + 1<<20 - 1) >> 20 << 20
 
 	blockResultsWorstJSON = 21_500_000 // the chain's measured worst (above)
 	largestRPCTx          = (nodeMaxTxBytes+2)/3*4 + maxTxJSON + answerEnvelope
-	largestLCDTx          = 2*2*nodeMaxTxBytes + maxTxJSON + answerEnvelope
+	largestLCDTx          = 2*chainJSONEscapeBytes*nodeMaxTxBytes + maxTxJSON + answerEnvelope
 	largestRPCBlock       = (chainBlockMaxBytes-chainEvidenceMaxBytes+2)/3*4 + 3*chainEvidenceMaxBytes + answerEnvelope
 )
 

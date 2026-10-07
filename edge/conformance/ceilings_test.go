@@ -140,6 +140,9 @@ func TestAnswerCeilingsFitTheChain(t *testing.T) {
 	txResult, freeBytes, gasPerByte, errBytes := need("resultcap.MaxTxResultBytes"), need("resultcap.FreeBytes"),
 		need("resultcap.GasPerByte"), need("resultcap.MaxErrorBytes")
 	endBlock, jsonX10 := need("resultcap.MaxEndBlockResultBytes"), need("resultcap.JSONPerCountedByteX10")
+	// A tx's own strings in the LCD's JSON: up to the chain's escape factor
+	// per byte (\u003c for '<'), each tx written twice (R9-D-1).
+	escape := need("resultcap.JSONEscapeBytes")
 	ante, blockResultsMeasured := filter.Assumptions()
 	tx, txLCD, blockResults, search, block, blockLCD := filter.AnswerCeilings()
 
@@ -168,11 +171,11 @@ func TestAnswerCeilingsFitTheChain(t *testing.T) {
 		ceil, max int64
 	}{
 		{"RPC tx", tx, b64(mempoolMaxTx) + result},
-		{"LCD txs/{hash}", txLCD, 2*2*mempoolMaxTx + result},
+		{"LCD txs/{hash}", txLCD, 2*escape*mempoolMaxTx + result},
 		{"RPC block", block, blockJSON},
 		{"LCD block (block and sdk_block)", blockLCD, 2 * blockJSON},
 		{"block_results", blockResults, blockResultsMax},
-		{"LCD tx.height=N search", search, 4*maxBlock + blockResultsMax},
+		{"LCD tx.height=N search", search, 2*escape*maxBlock + blockResultsMax},
 	} {
 		t.Logf("%-32s ceiling %3d MiB, largest answer ~%.1f MiB", x.what, x.ceil>>20, float64(x.max)/(1<<20))
 		if x.ceil < x.max {

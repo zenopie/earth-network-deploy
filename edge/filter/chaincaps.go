@@ -24,6 +24,10 @@ const (
 	// JSON bytes per counted result byte, x10: the chain counts escapes at
 	// their JSON size, so only JSON structure is left over (3.3x at worst).
 	chainJSONPerCountedByteX10 = 33
+	// The most bytes one byte of a string becomes in a node's JSON (\u003c
+	// for '<'): the chain's count for event strings, and the factor for a
+	// tx's own strings in the LCD's tx answers (audit R9-D-1).
+	chainJSONEscapeBytes = 6
 	// Consensus params (genesis): block bytes, evidence bytes within them,
 	// and block gas, which bounds a relay tx's and a block's paid results.
 	chainBlockMaxBytes    = 4 << 20
@@ -43,6 +47,7 @@ var chainCaps = map[string]int64{
 	"resultcap.GasPerByte":            chainGasPerByte,
 	"resultcap.MaxErrorBytes":         chainMaxErrorBytes,
 	"resultcap.JSONPerCountedByteX10": chainJSONPerCountedByteX10,
+	"resultcap.JSONEscapeBytes":       chainJSONEscapeBytes,
 	"genesis.block.max_bytes":         chainBlockMaxBytes,
 	"genesis.evidence.max_bytes":      chainEvidenceMaxBytes,
 	"genesis.block.max_gas":           chainBlockMaxGas,
