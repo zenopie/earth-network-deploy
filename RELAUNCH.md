@@ -32,10 +32,17 @@ reads `block_results` from it from height 1. There is no separate archive lease.
 ## 1. Gates: nothing goes on a lease until these exist
 
 1. **The final audit is closed** on every repo's final code (no Medium or higher open).
-2. **Store builds of both apps, live before `genesis_time`.** Registration, claims,
+2. **Wallet release branches ready, final circuits frozen.** Registration, claims,
    votes and every private tx need the final circuits, tx formats and chain id. An old
-   build can do none of them on the new chain, and review takes days.
-   - **iOS (TestFlight):** archive from the mobile release branch after the final
+   build can do none of them on the new chain. The **store builds are not made here**:
+   both wallets pin the served genesis hash (section 2, step 5), which exists only
+   after the ceremony fixes `genesis_time`. So they are built in section 2, step 6,
+   and `genesis_time` is chosen to leave room for store review (section 2 intro).
+   What must be ready now: the release branches build, the circuits in them are the
+   final ones (their verifying keys are the ones the genesis will carry), and a
+   pre-release build of each passes on a devnet. The build steps, for section 2,
+   step 6:
+   - **iOS (TestFlight, then App Store):** archive from the mobile release branch after the final
      circuit commit; upload with `xcodebuild -exportArchive` (`destination=upload`,
      team `XD8VH8WKVX`, bundle `network.erth.EarthWallet`). iOS bundles the circuits
      from the Android assets at build time: hash the circuits inside the built `.app`
@@ -47,6 +54,9 @@ reads `block_results` from it from height 1. There is no separate archive lease.
      `public/.well-known/assetlinks.json` in the web app must carry the Play
      app-signing fingerprint for `/ref/<handle>` App Links.
    - The verifying keys in the genesis must be the ones these builds prove against.
+   - Both builds need the served-genesis pin (`EARTH_GENESIS_SHA256` /
+     `genesisSHA256`, section 2, step 5). A build without it refuses every node in
+     the own-node setting as "other genesis".
 3. **Chain release candidate**: everything merged, `make genesis-check` and the test
    suite green. The tag is cut at the ceremony (section 2), because the genesis is
    baked into the image.
@@ -71,9 +81,15 @@ reads `block_results` from it from height 1. There is no separate archive lease.
      visibility), and writes `…@sha256:<digest>` into the `edge` service of
      `akash/deploy.yaml`. Commit that line. `build-sdl.py` refuses the all-zero
      placeholder, a tag, or a `command` on `edge`.
-   - Any later change to `edge/` or to `chain.pin` repeats both steps, and goes out
-     with `bin/deploy.sh` like any SDL change (an image change on `edge` only; the
-     node's volume is untouched).
+   - Any later change to `edge/` **or to `chain.pin`** repeats both steps:
+     conformance against the pinned chain, then `bin/build-edge.sh --pin`.
+     Conformance is the build gate, so the pinned edge digest must come from a commit
+     whose conformance passed against the chain it will front. A change to
+     `chain.pin` alone usually leaves the image bytes the same (`edge/conformance/`
+     is outside the build context), and then `--pin` writes the same digest and there
+     is nothing to commit. Rebuild anyway; do not reason about whether the bytes
+     changed. A new digest goes out with `bin/deploy.sh` like any SDL change (an image
+     change on `edge` only; the node's volume is untouched).
    - `edge/conformance` also checks the answer ceilings (`edge/filter/forward.go`)
      against the pinned chain's block `max_bytes` (4 MiB) and its 1 MiB per-tx
      result cap: a chain release that changes either fails here.
@@ -88,7 +104,12 @@ reads `block_results` from it from height 1. There is no separate archive lease.
 
    `--pin` writes `ghcr.io/zenopie/earth-network-node@sha256:<digest>  # FROM <base>`
    on both image lines; commit them, and make the `earth-network-node` package
-   **public**. `build-sdl.py` refuses a release build (`deploy.sh` / `create.sh
+   **public**. The build passes `akash/genesis.sha256` too: it fails unless the base
+   image's baked genesis hashes to it, and labels the image with the base and that
+   sha256. `bin/check-node-image.py` reads those labels back from the registry, after
+   the push and in every `deploy.sh` / `create.sh` before anything is sent, so the
+   `# FROM` comment cannot claim a base the image was not built on. So the genesis
+   pin is written (section 2, step 4) before the node image is built. `build-sdl.py` refuses a release build (`deploy.sh` / `create.sh
    <tag>`) unless the tag's chain image is `node/base.pin` and both lines' `FROM`,
    and refuses the placeholder, the chain image itself, or a `command` on `node`.
    Any later change to `node/` repeats `--pin` (no new `--base`).
@@ -104,10 +125,31 @@ reads `block_results` from it from height 1. There is no separate archive lease.
 
 ## 2. Genesis ceremony (chain repo)
 
-Pick **`genesis_time`** at the ceremony, not before: a real UTC instant after the store
-builds are live and when you have hours free to watch the launch. Emission and the POL
-burn are prorated from `genesis_time`, so a time already past pays the whole gap out at
-height 2.
+Pick **`genesis_time`** at the ceremony, not before: a real UTC instant when you have
+hours free to watch the launch, and **at least 7 days after the ceremony**. The
+wallets' store builds can only be made after the ceremony (step 5 pins the served
+genesis hash, which depends on `genesis_time`), and they must be live before it:
+App Store review usually takes 1-2 days but a rejection restarts it, and Google Play
+review of a production release can take several days (up to 7). Seven days covers
+one round of each with a resubmission; take 10 if either store has been slow
+lately. Emission and the POL burn are prorated from `genesis_time`, so a time
+already past pays the whole gap out at height 2.
+
+**Prerequisite: the backend's edge credential**, once, before anything below. Every
+`--tunnel` build (step 1, section 3) derives the edge's backend reserve
+(`EDGE_BACKEND_AUTH_SHA256`) from `CHAIN_EDGE_TOKEN` in this repo's `.env`, and the
+backend sends the same token (section 4). Generate it straight into both `.env`
+files, printing nothing:
+
+    bin/gen-edge-token.sh        # this repo's .env and earth-network-backend/.env
+
+It does nothing if both already hold the same token, copies it if only one does, and
+refuses two different ones. Never regenerate it after section 3, step 2: the
+lease's edge holds the hash of the token it was created with, and a PUT to the
+validator's pod is not applied until the pod is Ready at `genesis_time`, so the
+backend would have no reserve until after launch. (Rotation later is
+`bin/gen-edge-token.sh --replace`, then rule 0 and an in-place deploy of both;
+akash/README.md, "The backend's credential".)
 
 1. **Read the key facts off the `.env`**, sending nothing (no tag needed; the image
    line stays the committed placeholder):
@@ -120,7 +162,7 @@ height 2.
    `launch/launch.json`'s `consensus_pubkey` (`PGqvPN4C…`), one in its
    `used_consensus_keys` (the old chain's `kTMzo…`), or an address that does not
    derive from the pubkey. With `--tunnel` it also needs `CHAIN_EDGE_TOKEN` in `.env`
-   (the backend's, section 3.4): the edge's backend reserve is derived from it.
+   (the prerequisite above): the edge's backend reserve is derived from it.
 2. **Run the ceremony** on the operator's machine, from this repo, against the chain
    checkout at the release candidate:
 
@@ -178,8 +220,10 @@ height 2.
    installs. **In this repo**, write the printed sha256 into `akash/genesis.sha256`
    and commit. Then build and pin the node image on that tag (gate 1.5):
    `bin/build-node.sh --base <tag>`, commit `node/base.pin`, `bin/build-node.sh
-   --pin`, commit `akash/deploy.yaml`; and point `edge/conformance/chain.pin` at the
-   tag's commit and rerun conformance (gate 1.4).
+   --pin`, commit `akash/deploy.yaml` (the build needs the committed genesis pin:
+   it checks the base's genesis against it); and point `edge/conformance/chain.pin`
+   at the tag's commit, rerun conformance and rebuild and re-pin the edge image
+   (`bin/build-edge.sh --pin`, gate 1.4; commit if the digest changed).
 5. **Pin the wallets' genesis check.** Earth Wallet's own-node setting compares a
    node's `/genesis_chunked` with a pinned hash. CometBFT serves its own
    re-encoding of the genesis, not the file bytes, so this hash differs from
@@ -198,7 +242,17 @@ height 2.
          curl -s "https://rpc.erth.network/genesis_chunked?chunk=$i" | jq -r .result.data | base64 -d
        done | shasum -a 256
 
-   It must print the served hash. Build the wallet releases only after this.
+   It must print the served hash.
+6. **Store builds of both wallets**, now, with the pin from step 5 (gate 1.2 has the
+   steps): iOS archived and uploaded to TestFlight, then submitted to App Store review;
+   Android `bundleRelease` uploaded to Play and submitted for review. Both must be
+   **live before `genesis_time`**: that is what the 7-day margin above is for. Before
+   submitting, check each build carries the step 5 served hash and the final circuits
+   (hash the circuits inside the built `.app` against the repo copies). If review runs
+   out the clock, `genesis_time` cannot move without a new ceremony (it is in the
+   genesis): either launch with the apps still in review (nobody can register or
+   transact from a store build until they are live) or redo the ceremony with a later
+   time, which changes the genesis sha and both pins.
 
 **Check:**
 
@@ -283,9 +337,10 @@ chain tunnel (one token, one live connector).
    "Public RPC and LCD"), in place before `genesis_time`. The hostnames point at the
    filter: `rpc.* -> http://edge:26657`, `lcd.* -> http://edge:1317`, never `node:*`
    (that serves the public unfiltered). Then rule 0 (Skip **rate limiting rules
-   only** for the backend's `CHAIN_EDGE_TOKEN` header; generate the token now and
-   put it in the backend's `.env`, section 4.3 needs it, **and in this repo's
-   `.env`**, from which `build-sdl.py` derives the edge's backend reserve), rule 1
+   only** for the backend's `CHAIN_EDGE_TOKEN` header: the token
+   `bin/gen-edge-token.sh` wrote into both `.env` files in section 2's
+   prerequisite, which the lease's edge already hashes. Do not generate a new one
+   here), rule 1
    (block websocket upgrades), the two per-IP rate limits in the variant your plan
    accepts, and the `genesis_chunked` cache rule. **Purge `rpc.erth.network/genesis_chunked`
    from Cloudflare's cache** (Caching → Purge Cache → Custom Purge, by URL prefix): a
@@ -343,7 +398,7 @@ grant history.
        bin/create.py <tag> --provider <ADX provider>
 
    `GAS_WALLET_MNEMONIC` (the new wallet's, written 2026-10-04) and
-   `CHAIN_EDGE_TOKEN` (section 3.4) are injected from the backend's `.env`; the
+   `CHAIN_EDGE_TOKEN` (section 2, prerequisite) are injected from the backend's `.env`; the
    backend's `build-sdl.py` refuses to build without the token.
 4. **`api.erth.network`**: one connector per tunnel. Close the old lease
    `1790918719150` as soon as the new one serves, or the two connectors split
@@ -352,7 +407,7 @@ grant history.
    Nothing to do per lease: rule 0 matches the `CHAIN_EDGE_TOKEN` header wherever the
    backend runs, and skips only the rate limits; every call the backend makes is in
    the filter's public allowlist anyway; the edge gives the same header a few reserved
-   slots (`EDGE_BACKEND_AUTH_SHA256`, section 3.4). If the startup log says
+   slots (`EDGE_BACKEND_AUTH_SHA256`, section 2, prerequisite). If the startup log says
    `CHAIN_EDGE_TOKEN is unset`, the backend works but its re-index and grant bursts
    meet `429`s; if grants fail with gas-check unavailable and a `403 … refused by the
    edge filter`, gas-check made a call the filter does not serve (a chain change to
@@ -470,13 +525,33 @@ binary swap at a chosen height H, done by the operator (the one validator):
 2. **Pick H** a few hours to a day ahead, tag the release, and announce H and the tag
    in the docs for anyone running a node (a node still on the old binary at H stops
    agreeing with the chain).
-3. **Swap while the pod is Ready**, before H: `bin/deploy.sh <newtag>` with the
+3. **Rebuild the node image on the new tag** (gate 1.5). `deploy.sh <newtag>` is
+   refused until `node/base.pin` and both image lines' `# FROM` name the new tag's
+   chain image, and the image's registry labels say the same. First record the
+   rollback commit, the deploy commit the validator runs now, with nothing
+   uncommitted:
+
+       git status --porcelain              # empty
+       ROLLBACK=$(git rev-parse HEAD)      # write it down with <oldtag>
+
+   Then, with no other edit in between (so the rollback commit differs from the swap
+   only in the image pins):
+
+       bin/build-node.sh --base <newtag>   # writes node/base.pin; commit it
+       bin/build-node.sh --pin             # builds on it, pushes, pins node + relayer; commit akash/deploy.yaml
+       bin/deploy.sh <newtag> <validator's flags> --print >/dev/null && echo builds
+
+   The genesis is unchanged, so the new chain image must carry the same baked genesis
+   (`akash/genesis.sha256`); the node build refuses one that does not. Point
+   `edge/conformance/chain.pin` at the new tag too, rerun conformance and
+   `bin/build-edge.sh --pin` (gate 1.4); fix `edge/` first if conformance fails.
+4. **Swap while the pod is Ready**, before H: `bin/deploy.sh <newtag>` with the
    validator's flags. The pod restarts on the new image. Cosmovisor's `current`
    symlink points at `genesis/` (it creates that link on its first run, and only an
    `x/upgrade` plan repoints it to `upgrades/<name>`), and the entrypoint re-links
    `genesis/bin/earthd` to the image's binary on every start, so the new image's
    binary is what runs. Check `earthd version` and that blocks continue.
-4. **After H**, check the fix took effect. If it changes what `earthd gas-check`
+5. **After H**, check the fix took effect. If it changes what `earthd gas-check`
    accepts, bump the backend's earthd pin the same way (section 4.1).
 
 **Rollback.** A swap can fail two ways: the new image dies on start (a bad build, an
@@ -496,9 +571,22 @@ So, before every swap:
    their response time, and get a yes to "delete pod `node-0` of lease `<DSEQ>` on
    request" for the swap window. No confirmed contact, no swap. (The same arrangement
    is what a `halt-height` stop needs; see below.)
-2. **The old tag ready.** `bin/digest.sh <oldtag>` resolves, and
-   `bin/deploy.sh <oldtag> --print` with the validator's flags builds. Write down the
-   exact command.
+2. **The rollback ready, as it will be run.** From the swap checkout,
+   `deploy.sh <oldtag>` is refused (`node/base.pin` names the new tag). The rollback
+   deploys from a worktree at the rollback commit (swap step 3), which pins the old
+   node image and has every other SDL value the validator runs (`EXTERNAL_ADDRESS`,
+   relayer ids). `.env` is not in git, so link it in:
+
+       git worktree add ../deploy-rollback "$ROLLBACK"
+       ln -s "$PWD/.env" ../deploy-rollback/.env
+       (cd ../deploy-rollback && bin/deploy.sh <oldtag> <validator's flags> --print >/dev/null && echo builds)
+
+   Run this after the swap commits exist, not before, and keep the worktree until H
+   has passed. Write down the exact command without `--print`. Pinned-digest
+   alternative, if the worktree is lost: `git checkout "$ROLLBACK" -- node/base.pin
+   akash/deploy.yaml` in the main checkout restores the old pins (the old node image is
+   still in the registry under its digest; `bin/check-node-image.py` verifies it), but
+   it also reverts any SDL edit made after the rollback commit, so prefer the worktree.
 3. **Rehearse H, not just the sync.** The scratch node from step 1 proves start-up and
    agreement below H, on the new image, on an ADX host. To run H itself before the
    validator does: stop the scratch node at H-1 (`EARTHD_HALT_HEIGHT=H-1` is fine on a
@@ -512,8 +600,10 @@ So, before every swap:
 
 Then the rollback, by failure:
 
-- **Dies on start, before H**: `deploy.sh <oldtag>` (accepted, not yet applied), then
-  ask the provider to delete `node-0`. The old binary resumes where the chain stopped:
+- **Dies on start, before H**: from the rollback worktree, `bin/deploy.sh <oldtag>`
+  with the validator's flags (accepted, not yet applied), then ask the provider to
+  delete `node-0`. Afterwards revert the swap commits in the main checkout (or
+  rebuild on a fixed tag), so the next deploy from it is not the failed image. The old binary resumes where the chain stopped:
   every block the new binary committed below H is one the old binary would have
   produced. Downtime is the provider's response time.
 - **Panics while executing H** (in `FinalizeBlock`, before the app commits H): the
@@ -527,7 +617,8 @@ Then the rollback, by failure:
   signing.
 - **The app committed H, then a crash at H+1 or later**: the old binary cannot follow,
   because the committed state already has the change. There is no rollback, only fix
-  forward: a corrected new binary, the same `deploy.sh` plus provider pod deletion.
+  forward: a corrected new binary (its node image rebuilt as in step 3), the same
+  `deploy.sh` plus provider pod deletion.
   This is why step 3's rehearsal of H matters. (A scratch node that also ran H on the
   new binary must be resynced if the chain then went the other way.)
 
@@ -567,8 +658,10 @@ governance; then cosmovisor's `current` outranks the image.
     evidence against the only validator, and it tells every wallet and the indexer
     that history changed (the indexer halts on the block-hash mismatch). Starting
     over means a new genesis, a new `genesis_time` and a **new consensus key** (add
-    `PGqvPN4C…` to the used-key lists in `bin/build-sdl.py` and the chain's
-    `scripts/ceremony.sh`), decided by a human, not a script.
+    `PGqvPN4C…` to `used_consensus_keys` in `launch/launch.json`, which
+    `bin/build-sdl.py`, `bin/check-genesis.sh` and the chain's `scripts/ceremony.sh`
+    all read, and set `consensus_pubkey` to the new key), decided by a human, not a
+    script.
   - So protect the volume: keep the escrow funded, never close this lease, and check
     the disk (section 3).
 - **Two nodes and the consensus key.** Never run two nodes holding the consensus key.

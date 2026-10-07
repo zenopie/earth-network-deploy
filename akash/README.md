@@ -288,9 +288,12 @@ by a public flood. So it sends
 
 A leaked token buys an address the backend's rate and its few reserved slots (the
 per-class caps still bound what reaches the signer, and the public slots are not
-affected), not the R3-BD-1 harm it bought under the old allowlist (R4-E-6). Rotating
-it is editing rule 0, the backend's `.env` and this repo's `.env` together, then an
-in-place deploy of both.
+affected), not the R3-BD-1 harm it bought under the old allowlist (R4-E-6). The token
+is made once by `bin/gen-edge-token.sh`, which writes it into this repo's and the
+backend's `.env` without printing it (RELAUNCH.md section 2, before the first
+`--tunnel` build). Rotating it is `bin/gen-edge-token.sh --replace` (both `.env`
+files), rule 0, then an in-place deploy of both; not while the validator's pod is
+not Ready (before `genesis_time`), when the PUT would not be applied.
 
 Compute the header value from the backend's `.env` on the operator's machine:
 
