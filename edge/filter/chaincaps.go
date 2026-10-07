@@ -12,7 +12,8 @@ package filter
 // constant X of the chain's app/resultcap package; "genesis.X" a consensus
 // param of networks/genesis.json.
 const (
-	// A tx's msg results, unless every msg is a relay msg (resultcap).
+	// A tx's msg results, counted at their worst-case JSON size, unless
+	// every msg is a relay msg (resultcap).
 	chainMaxTxResultBytes = 1 << 20
 	// The free per-tx result allowance, and the gas per byte past it: a
 	// relay tx's result is bounded only by FreeBytes + gas / GasPerByte.
@@ -20,6 +21,9 @@ const (
 	chainGasPerByte = 20
 	// The cap on an error text that reaches a result (a failed tx's log).
 	chainMaxErrorBytes = 1 << 10
+	// JSON bytes per counted result byte, x10: the chain counts escapes at
+	// their JSON size, so only JSON structure is left over (3.3x at worst).
+	chainJSONPerCountedByteX10 = 33
 	// Consensus params (genesis): block bytes, evidence bytes within them,
 	// and block gas, which bounds a relay tx's and a block's paid results.
 	chainBlockMaxBytes    = 4 << 20
@@ -34,11 +38,12 @@ const nodeMaxTxBytes = 1 << 20
 
 // chainCaps: each mirrored value by the name conformance reads it under.
 var chainCaps = map[string]int64{
-	"resultcap.MaxTxResultBytes": chainMaxTxResultBytes,
-	"resultcap.FreeBytes":        chainFreeBytes,
-	"resultcap.GasPerByte":       chainGasPerByte,
-	"resultcap.MaxErrorBytes":    chainMaxErrorBytes,
-	"genesis.block.max_bytes":    chainBlockMaxBytes,
-	"genesis.evidence.max_bytes": chainEvidenceMaxBytes,
-	"genesis.block.max_gas":      chainBlockMaxGas,
+	"resultcap.MaxTxResultBytes":      chainMaxTxResultBytes,
+	"resultcap.FreeBytes":             chainFreeBytes,
+	"resultcap.GasPerByte":            chainGasPerByte,
+	"resultcap.MaxErrorBytes":         chainMaxErrorBytes,
+	"resultcap.JSONPerCountedByteX10": chainJSONPerCountedByteX10,
+	"genesis.block.max_bytes":         chainBlockMaxBytes,
+	"genesis.evidence.max_bytes":      chainEvidenceMaxBytes,
+	"genesis.block.max_gas":           chainBlockMaxGas,
 }

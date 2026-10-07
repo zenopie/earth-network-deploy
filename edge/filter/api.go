@@ -109,9 +109,9 @@ func ChainCaps() map[string]int64 {
 	return out
 }
 
-// TxAllowances: the stored-result bytes a tx may add outside the chain's
-// msg-result cap (its ante events and log), and the JSON bytes per stored
-// result byte, as the ceilings assume them (forward.go).
-func TxAllowances() (anteBytes, jsonPerByte int64) {
-	return txAnteBytes, jsonPerResultByte
+// Assumptions: the result bytes a tx stores outside the chain's count (its
+// ante events), and the chain's measured worst block_results JSON, which
+// no chain constant states (forward.go).
+func Assumptions() (txAnteBytes_, blockResultsWorstJSON_ int64) {
+	return txAnteBytes, blockResultsWorstJSON
 }

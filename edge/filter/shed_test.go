@@ -92,7 +92,7 @@ func TestOversizedAnswerShed(t *testing.T) {
 				if asked.Load() != 1 {
 					t.Fatalf("node asked %d times", asked.Load())
 				}
-				waitFor(t, func() bool { return c.oversized.size() == 1 })
+				waitFor(t, func() bool { return c.answers.size() == 1 })
 				for i := 0; i < 5; i++ {
 					target := tc.target
 					if tc.lcd && i%2 == 1 {
@@ -138,8 +138,8 @@ func TestLatestBlockResultsNotShed(t *testing.T) {
 			t.Fatalf("oversized latest block_results: %d", code)
 		}
 	}
-	if asked.Load() != 2 || c.oversized.size() != 0 {
-		t.Fatalf("latest block_results shed: asked %d, %d keys", asked.Load(), c.oversized.size())
+	if asked.Load() != 2 || c.answers.size() != 0 {
+		t.Fatalf("latest block_results shed: asked %d, %d keys", asked.Load(), c.answers.size())
 	}
 }
 
@@ -158,5 +158,66 @@ func TestShedListBounds(t *testing.T) {
 	}
 	if s.has("") {
 		t.Fatal("empty key shed")
+	}
+}
+
+// R8-D-1: a tx whose answer turned out heavy (a relay tx of megabytes, a
+// loud contract call) is served to the public from the bulk class after its
+// first build, so asking for it again and again cannot hold the txhash
+// slots that commit polls need. The backend is not moved.
+func TestHeavyAnswerMovesToBulk(t *testing.T) {
+	auth := "Basic ZWFydGgtYmFja2VuZDp0b2tlbg=="
+	sum := sha256.Sum256([]byte(auth))
+	const hash = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	heavy := "/tx?hash=0x" + hash
+	node, asked := countingBigNode(t, 2<<20, false, heavy)
+	c := DefaultClasses()
+	c.SetBackendAuthSHA256(sum[:])
+	c.bulk.wait = 0
+	srv := httptest.NewServer(NewRPC(node.URL, client(), c))
+	defer srv.Close()
+
+	if code, n, err := fetch(t, srv.URL+heavy, ""); err != nil || code != http.StatusOK || n != 2<<20 {
+		t.Fatalf("heavy tx, first read: %d, %d bytes, %v", code, n, err)
+	}
+	waitFor(t, func() bool { return c.answers.get("rpc-tx/"+hash) == markHeavy })
+	// Every public bulk slot busy (other clients' block_results).
+	pub, _ := c.bulk.caps()
+	var rels []func()
+	for i := range pub {
+		rels = append(rels, c.bulk.acquire(t.Context(), false, uint64(1000+i)))
+	}
+	if code, _, _ := fetch(t, srv.URL+heavy, ""); code != http.StatusServiceUnavailable {
+		t.Fatalf("heavy tx with bulk full: %d, want 503 (it must not use txhash)", code)
+	}
+	if code, _, _ := fetch(t, srv.URL+"/tx?hash=0x"+strings.Repeat("ab", 32), ""); code != http.StatusOK {
+		t.Fatalf("an ordinary tx with bulk full: %d", code)
+	}
+	if code, n, err := fetch(t, srv.URL+heavy, auth); err != nil || code != http.StatusOK || n != 2<<20 {
+		t.Fatalf("backend, heavy tx, bulk full: %d, %d bytes, %v", code, n, err)
+	}
+	for _, rel := range rels {
+		rel()
+	}
+	before := asked.Load()
+	if code, n, err := fetch(t, srv.URL+heavy, ""); err != nil || code != http.StatusOK || n != 2<<20 {
+		t.Fatalf("heavy tx from bulk: %d, %d bytes, %v", code, n, err)
+	}
+	if asked.Load() != before+1 {
+		t.Fatal("heavy tx not served")
+	}
+	waitFor(t, func() bool { return used(c.bulk)+used(c.txhash) == 0 })
+}
+
+func TestAnswerMarks(t *testing.T) {
+	s := newShedList(time.Minute, 8)
+	s.mark("k", markHeavy)
+	if s.get("k") != markHeavy || s.has("k") {
+		t.Fatal("heavy")
+	}
+	s.mark("k", markOver)
+	s.mark("k", markHeavy) // never goes down while it lives
+	if !s.has("k") {
+		t.Fatal("over did not stick")
 	}
 }

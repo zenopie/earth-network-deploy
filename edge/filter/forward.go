@@ -59,9 +59,10 @@ type fwdOpts struct {
 	// streams past it is cut off mid-body (the connection is aborted, so
 	// the client sees a broken answer, never a short valid one).
 	maxResp int64
-	// shed, if set, names the answer for shedding (shed.go): a key made of
-	// the tx hash or block height only. An answer once found over maxResp
-	// is refused to public clients without asking the node again.
+	// shed, if set, names the answer (shed.go): a key made of the tx hash
+	// or block height only. An answer once found over maxResp is refused
+	// to public clients without asking the node again; one found heavy is
+	// served to them from the bulk class.
 	shed string
 }
 
@@ -72,39 +73,40 @@ type fwdOpts struct {
 // memory. What bounds the build is the chain (chaincaps.go, each value
 // checked against the pinned chain by edge/conformance):
 //
-//   - a block: max_bytes 4 MiB, evidence up to 1 MiB of it;
+//   - a block: max_bytes 4 MiB, evidence up to 1 MiB of it, max_gas 100M;
 //   - a tx: at most nodeMaxTxBytes (1 MiB, the only proposer's mempool);
-//   - a tx's stored result: MaxTxResultBytes (1 MiB) of msg results for any
-//     tx with a non-relay msg, plus its ante events (under txAnteBytes) and
-//     a log cut to MaxErrorBytes. A relay tx (only MsgRecvPacket,
-//     MsgAcknowledgement, MsgTimeout, client updates: what a relayer sends)
-//     has no byte cap, only gas: FreeBytes + gas / GasPerByte, about 5 MB at
-//     the 100M block gas. Ceilings are sized for the first kind, every tx a
-//     wallet or contract call can make; a relay tx past them is cut for the
-//     public like an oversized block_results, and shed (shed.go). Relayers
-//     read the node directly, inside the lease, and the backend has no
-//     ceiling.
+//   - a tx's result, counted at its worst-case JSON size (an escaped '<' is
+//     6, a msg response 2 per byte): MaxTxResultBytes (1 MiB) for a tx
+//     with any msg that is not a relay msg; for a relay tx (packet
+//     receives, acks, timeouts, client updates: what a relayer sends, and
+//     anyone can send on their own channel) only gas, FreeBytes + gas /
+//     GasPerByte, ~5 MB at the block's gas. Plus its ante events (not
+//     counted; under txAnteBytes) and a log cut to MaxErrorBytes;
+//   - JSON structure is the one thing not counted: an answer is at most
+//     JSONPerCountedByteX10/10 (3.3) times what was counted (one-byte keys,
+//     empty values).
 //
-// In JSON, bytes are base64 (4/3) and an event attribute costs up to ~4.6x
-// its proto size (one-byte keys and values), ~6x when its characters are
-// ones encoding/json escapes as \u00XX (<, >, &, control bytes, invalid
-// UTF-8): jsonPerResultByte. Each single-tx and single-block ceiling is the
-// largest answer those allow, plus a quarter for what the estimate misses,
-// rounded up to a MiB. edge/conformance recomputes each largest answer
-// from the pinned chain's own numbers and fails if a ceiling is under it.
+// Each ceiling is the largest answer those allow, relay txs included (they
+// are legitimate answers), plus a quarter for what the estimate misses,
+// rounded up to a MiB. edge/conformance recomputes each from the pinned
+// chain's own numbers and fails if a ceiling is under it. No answer the
+// chain can produce is cut, then; the ceiling and shedding (shed.go) are
+// for the case where these numbers are wrong. What keeps heavy builds few
+// is the classes: an answer once seen heavy is served from the small bulk
+// class (shed.go).
 const (
-	jsonPerResultByte = 6
-	txAnteBytes       = 8 << 10 // a private tx's ante events, 6.5 KB at most (chain resultcap doc)
-	answerEnvelope    = 64 << 10
-	// The largest stored result of a tx that is not all relay msgs.
-	maxTxResult = chainMaxTxResultBytes + txAnteBytes + chainMaxErrorBytes
+	txAnteBytes    = 8 << 10 // a private tx's ante events, 6.5 KB at most (chain resultcap doc)
+	answerEnvelope = 64 << 10
+	// The most a tx's result is counted: a relay tx at the block's gas, with
+	// its ante events and log (a non-relay tx's 1 MiB is below it).
+	maxTxCounted = chainFreeBytes + chainBlockMaxGas/chainGasPerByte + txAnteBytes + chainMaxErrorBytes
+	maxTxJSON    = maxTxCounted * chainJSONPerCountedByteX10 / 10
 
-	// RPC tx: the tx in base64 and the result: ~7.4 MiB at the chain's
-	// caps, ceiling 10 MiB.
+	// RPC tx: the tx in base64 and the result: ~17.2 MiB, ceiling 22 MiB.
 	maxRespTx = (largestRPCTx*5/4 + 1<<20 - 1) >> 20 << 20
 	// LCD txs/{hash}: the tx twice (tx and tx_response.tx), decoded to JSON
-	// (counted at 2x its bytes each), and the result: ~10.1 MiB, ceiling
-	// 13 MiB.
+	// (counted at 2x its bytes each), and the result: ~19.9 MiB, ceiling
+	// 25 MiB.
 	maxRespTxLCD = (largestLCDTx*5/4 + 1<<20 - 1) >> 20 << 20
 	// RPC block: txs in base64 and evidence in JSON at up to 3x its proto
 	// size (votes with base64 signatures and hex hashes), sharing
@@ -112,19 +114,22 @@ const (
 	maxRespBlock = (largestRPCBlock*5/4 + 1<<20 - 1) >> 20 << 20
 	// LCD block: block and sdk_block, both in full: ceiling 18 MiB.
 	maxRespBlockLCD = (2*largestRPCBlock*5/4 + 1<<20 - 1) >> 20 << 20
-
-	// One block's results: paid bytes up to block gas / GasPerByte (5 MB)
-	// plus every tx's free allowance, ~10 MB of results at worst, up to
-	// ~60 MB of JSON, which only a block built to be large reaches. Not
-	// sized to fit it: past this a public read of the height is cut, and
-	// shed. The indexer (the backend) has no ceiling.
+	// One block's results. Paid bytes and free tiers share the block's
+	// gas; the chain measures the worst at ~21.5 MB of JSON (free-tier txs
+	// of tiny attributes, plus gov's EndBlock; chain TestResultCapWorstCase,
+	// not a constant this can mirror), ceiling 32 MiB. edge/conformance
+	// checks it against the bound the chain's constants give for paid
+	// bytes and gov.
 	maxRespBlockResults = 32 << 20
-	// LCD tx.height=N: at most 50 txs with their results; cut likewise.
-	maxRespSearch = 32 << 20
+	// LCD tx.height=N: at most 50 txs, each twice (txs and tx_responses)
+	// as JSON at 2x its bytes, within the block's bytes, and their results
+	// (block_results' worst): ~38 MB, ceiling 46 MiB.
+	maxRespSearch = ((4*chainBlockMaxBytes+blockResultsWorstJSON)*5/4 + 1<<20 - 1) >> 20 << 20
 
-	largestRPCTx    = (nodeMaxTxBytes+2)/3*4 + jsonPerResultByte*maxTxResult + answerEnvelope
-	largestLCDTx    = 2*2*nodeMaxTxBytes + jsonPerResultByte*maxTxResult + answerEnvelope
-	largestRPCBlock = (chainBlockMaxBytes-chainEvidenceMaxBytes+2)/3*4 + 3*chainEvidenceMaxBytes + answerEnvelope
+	blockResultsWorstJSON = 21_500_000 // the chain's measured worst (above)
+	largestRPCTx          = (nodeMaxTxBytes+2)/3*4 + maxTxJSON + answerEnvelope
+	largestLCDTx          = 2*2*nodeMaxTxBytes + maxTxJSON + answerEnvelope
+	largestRPCBlock       = (chainBlockMaxBytes-chainEvidenceMaxBytes+2)/3*4 + 3*chainEvidenceMaxBytes + answerEnvelope
 )
 
 // Downstream writes (round-6 R6-E-4). The slot is held while the answer
@@ -166,13 +171,14 @@ type upstreamResult struct {
 func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 	method, pathQuery string, body []byte, header http.Header, o fwdOpts) {
 	backend := u.classes.isBackend(r)
-	shed := ""
-	if !backend && o.maxResp > 0 {
-		shed = o.shed
-	}
-	if u.classes.oversized.has(shed) {
-		http.Error(w, "answer too large", http.StatusBadGateway)
-		return
+	if !backend {
+		switch u.classes.answers.get(o.shed) {
+		case markOver:
+			http.Error(w, "answer too large", http.StatusBadGateway)
+			return
+		case markHeavy:
+			cl = u.classes.bulk
+		}
 	}
 	var client uint64
 	if !backend {
@@ -233,8 +239,12 @@ func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 	if backend {
 		limit = 0
 	}
+	if o.maxResp > 0 && res.resp.ContentLength > o.maxResp {
+		u.classes.answers.mark(o.shed, markOver)
+	} else if res.resp.ContentLength > heavyAnswer {
+		u.classes.answers.mark(o.shed, markHeavy)
+	}
 	if limit > 0 && res.resp.ContentLength > limit {
-		u.classes.oversized.add(shed)
 		http.Error(w, "answer too large", http.StatusBadGateway)
 		return
 	}
@@ -248,10 +258,16 @@ func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 		h.Set("Cache-Control", o.cache)
 	}
 	w.WriteHeader(res.resp.StatusCode)
-	if !copyAnswer(w, res.resp.Body, limit, release) {
+	n, ok := copyAnswer(w, res.resp.Body, limit, release)
+	switch {
+	case o.maxResp > 0 && n > o.maxResp:
+		u.classes.answers.mark(o.shed, markOver)
+	case n > heavyAnswer:
+		u.classes.answers.mark(o.shed, markHeavy)
+	}
+	if !ok {
 		// Past the ceiling: the status is already sent, so the only honest
 		// answer is a broken one. The deferred closes and release run.
-		u.classes.oversized.add(shed)
 		panic(http.ErrAbortHandler)
 	}
 }
@@ -259,8 +275,9 @@ func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 // copyAnswer streams the node's answer to the client: at most limit bytes
 // (0: no limit), each write under writeStall and all of them under writeMax.
 // It calls release as soon as the node's answer has been read to its end.
-// It returns false only when the answer passed limit.
-func copyAnswer(w http.ResponseWriter, src io.Reader, limit int64, release func()) bool {
+// It returns the bytes read from the node, and false only when the answer
+// passed limit.
+func copyAnswer(w http.ResponseWriter, src io.Reader, limit int64, release func()) (int64, bool) {
 	rc := http.NewResponseController(w)
 	end := time.Now().Add(writeMax)
 	buf := make([]byte, 32<<10)
@@ -272,7 +289,7 @@ func copyAnswer(w http.ResponseWriter, src io.Reader, limit int64, release func(
 		}
 		total += int64(n)
 		if limit > 0 && total > limit {
-			return false
+			return total, false
 		}
 		if n > 0 {
 			d := time.Now().Add(writeStall)
@@ -282,11 +299,11 @@ func copyAnswer(w http.ResponseWriter, src io.Reader, limit int64, release func(
 			// ErrNotSupported only off a real connection (tests).
 			_ = rc.SetWriteDeadline(d)
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return true
+				return total, true
 			}
 		}
 		if err != nil {
-			return true
+			return total, true
 		}
 	}
 }

@@ -205,7 +205,7 @@ func TestSlowReaderFreesSlot(t *testing.T) {
 func TestCopyAnswerReleasesAtEOF(t *testing.T) {
 	var released bool
 	w := &blockingWriter{ResponseRecorder: httptest.NewRecorder(), before: func() bool { return released }}
-	ok := copyAnswer(w, strings.NewReader("short answer"), 0, func() { released = true })
+	_, ok := copyAnswer(w, strings.NewReader("short answer"), 0, func() { released = true })
 	if !ok || !w.sawReleased {
 		t.Fatalf("released before the last write: %v", w.sawReleased)
 	}

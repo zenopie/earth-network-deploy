@@ -5,91 +5,123 @@ import (
 	"time"
 )
 
-// Expensive-answer shedding (round-8 R8-D-1). A tx by hash and a height's
+// Expensive-answer memory (round-8 R8-D-1). A tx by hash and a height's
 // block_results are answers whose size was fixed when the chain stored
 // them: the same request always gets the same answer, byte for byte. The
-// ceiling (forward.go) stops the copy of one that is too large, but only
-// after the node has built it whole, in memory several times over (round-6
-// R6-E-1). Without memory here, a client could ask for the same oversized
-// answer again and again, and the node would build it every time to have
-// it thrown away at the edge.
+// node builds such an answer whole, in memory several times over (round-6
+// R6-E-1), before the edge sees a byte of it, so what the edge can do is
+// remember what an answer turned out to be and not let it be built again
+// on the terms of a cheap one:
 //
-// So once a public answer passes its ceiling, its key is remembered for
-// shedTTL, and public requests for that key are refused (502 "answer too
-// large", the same answer the ceiling gave) without a slot and without
-// asking the node. The backend has no ceiling and is never shed.
+//   - over: the answer passed its ceiling (forward.go). Public requests for
+//     it are refused (502 "answer too large", what the ceiling gave)
+//     without a slot and without asking the node. With the ceilings derived
+//     from the chain's caps this only happens if those numbers are wrong.
+//   - heavy: the answer was more than heavyAnswer bytes. Public requests
+//     for it are served from the bulk class (2 slots, 1 per client) instead
+//     of their own: a tx by hash is in txhash because a commit poll is a
+//     millisecond point read, and a tx whose answer is megabytes (a relay
+//     tx of a few MB of results, or a contract call built to be loud, each
+//     paid for once and askable for ever) must not hold those slots for
+//     the price of one. Only its first build, per form and per shedTTL,
+//     happens in txhash.
 //
-// What is remembered: the kind of answer and the tx hash or block height
-// (e.g. "rpc-tx/<hash>", "block_results/<height>") and when it expires.
-// Nothing about the client that asked. In memory only, never logged, at
-// most shedMax entries (the oldest goes first when full). An answer cannot
-// be marked oversized unless it is: the mark is the node's own answer
-// passing the ceiling, so no client can shed a tx or height for anyone
-// else. block_results without a height (the latest block) is not keyed
-// and not shed: what it names changes every block.
+// A mark comes from the node's own answer, whoever asked (the backend's
+// reads mark too, though the backend is never refused or moved), so no
+// client can mark a tx or height for anyone else. What is held: the kind
+// of answer and the tx hash or block height (e.g. "rpc-tx/<hash>",
+// "block_results/<height>"), the mark and its expiry. Nothing about the
+// client. In memory only, never logged, at most shedMax entries (the
+// soonest to expire goes first when full). block_results without a height
+// (the latest block) is not keyed: what it names changes every block.
 //
 // The TTL is short because nothing else bounds how long an entry lives,
-// not because the answer could shrink: a key re-learnt after it expires
+// not because an answer could change: a key re-learnt after it expires
 // costs one more build.
 const (
-	shedTTL = 10 * time.Minute
-	shedMax = 4096
+	shedTTL     = 10 * time.Minute
+	shedMax     = 4096
+	heavyAnswer = 1 << 20
+)
+
+type answerMark uint8
+
+const (
+	markNone answerMark = iota
+	markHeavy
+	markOver
 )
 
 type shedList struct {
 	mu   sync.Mutex
 	ttl  time.Duration
 	max  int
-	keys map[string]time.Time // key -> expiry
+	keys map[string]shedEntry
+}
+
+type shedEntry struct {
+	exp  time.Time
+	mark answerMark
 }
 
 func newShedList(ttl time.Duration, max int) *shedList {
-	return &shedList{ttl: ttl, max: max, keys: map[string]time.Time{}}
+	return &shedList{ttl: ttl, max: max, keys: map[string]shedEntry{}}
 }
 
-// has: key is marked oversized and the mark has not expired.
-func (s *shedList) has(key string) bool {
+// get: key's mark, markNone if unmarked or expired.
+func (s *shedList) get(key string) answerMark {
 	if s == nil || key == "" {
-		return false
+		return markNone
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	exp, ok := s.keys[key]
+	e, ok := s.keys[key]
 	if !ok {
-		return false
+		return markNone
 	}
-	if time.Now().After(exp) {
+	if time.Now().After(e.exp) {
 		delete(s.keys, key)
-		return false
+		return markNone
 	}
-	return true
+	return e.mark
 }
 
-// add marks key oversized for the TTL.
-func (s *shedList) add(key string) {
-	if s == nil || key == "" {
+// has: key is marked over its ceiling.
+func (s *shedList) has(key string) bool { return s.get(key) == markOver }
+
+// add marks key over its ceiling for the TTL.
+func (s *shedList) add(key string) { s.mark(key, markOver) }
+
+// mark records m for key for the TTL; a key's mark never goes down while
+// it lives (over stays over).
+func (s *shedList) mark(key string, m answerMark) {
+	if s == nil || key == "" || m == markNone {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	if _, ok := s.keys[key]; !ok && len(s.keys) >= s.max {
+	e, ok := s.keys[key]
+	if ok && now.Before(e.exp) && e.mark > m {
+		m = e.mark
+	}
+	if !ok && len(s.keys) >= s.max {
 		var oldest string
 		var oldestExp time.Time
-		for k, exp := range s.keys {
-			if now.After(exp) {
+		for k, x := range s.keys {
+			if now.After(x.exp) {
 				delete(s.keys, k)
 				continue
 			}
-			if oldest == "" || exp.Before(oldestExp) {
-				oldest, oldestExp = k, exp
+			if oldest == "" || x.exp.Before(oldestExp) {
+				oldest, oldestExp = k, x.exp
 			}
 		}
 		if len(s.keys) >= s.max {
 			delete(s.keys, oldest)
 		}
 	}
-	s.keys[key] = now.Add(s.ttl)
+	s.keys[key] = shedEntry{exp: now.Add(s.ttl), mark: m}
 }
 
 // size reports the entries held (tests).

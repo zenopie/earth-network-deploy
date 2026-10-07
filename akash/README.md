@@ -149,8 +149,8 @@ The filter:
   broadcasts;
 - **caps answers sized by chain data** (`block_results`, a tx by hash): a class
   each and a byte ceiling per call (below), `block_results` small and separate from
-  the wallets' commit polls; the chain's result caps are the real bound, and an
-  answer once found over its ceiling is not asked of the node again;
+  the wallets' commit polls; the chain's result caps are the real bound, and a tx
+  answer once seen heavy is served from the small class;
 - bounds bodies (1 MiB each; read before any slot is taken, under a deadline of
   2 s + 128 KiB/s of their size; charged, copies included, to a 48 MiB byte budget,
   16 MiB for the backend, until answered; reserved in chunks that grow with what
@@ -232,7 +232,7 @@ node's answer has been read to its end.
 | --- | --- | --- | --- | --- | --- |
 | light | status, block, commit, validators, consensus_params, LCD blocks, preflights | 12 | 3 | +3 | 2 s |
 | results | blockchain, genesis_chunked | 8 | 2 | +4 | 2 s |
-| bulk | `block_results` (one block's results, up to ~10 MB for a block built to be large) | 2 | 1 | +1 | 2 s |
+| bulk | `block_results` (one block's results, up to ~21.5 MB of JSON for a block built to be large), and a tx by hash once its answer was seen over 1 MiB | 2 | 1 | +1 | 2 s |
 | txhash | a tx by hash: RPC `tx`, LCD `txs/{hash}` (wallet commit polls, activity refresh) | 8 | 2 | +2 | 2 s |
 | query | LCD gRPC GETs (outside the ABCI mutex, metered by query gas) | 12 | 3 | +4 | 2 s |
 | abci-query | RPC `abci_query` (gRPC paths and `/store/` reads), `abci_info`: ABCI mutex | 1 | 1 | +1 | 4 s |
@@ -265,46 +265,58 @@ and within the edge's 64 connections per upstream (a test holds the classes to i
 A tx by hash has its own class (round-7 R7-D-1): almost every lookup is a
 millisecond point read, so it does not need `block_results`' tiny class, and a flood
 of heavy `block_results` reads cannot make a committed tx look unconfirmed to the
-wallets. Heavy txs can be bought (1 MiB of results for ~0.1 ERTH of gas; a relay tx,
+wallets. Heavy txs can be bought (1 MiB counted for ~0.1 ERTH of gas; a relay tx,
 bounded only by gas, ~5 MB for ~0.5 ERTH), so one address holds at most 2 of its 8
-slots, and a tx over its ceiling is shed (below). At most 4 of them hold or queue on the
+slots, and a tx seen heavy is served from `bulk` (below). At most 4 of them hold or queue on the
 ABCI mutex, so a consensus step waits behind at most four bounded calls; reads and
 broadcasts have separate slots, so a flood of `abci_query` cannot refuse wallet
 broadcasts (round-6 R6-E-3).
 
 **Answer ceilings** (round-6 R6-E-1, re-derived in round 8). A public answer to RPC
-`tx` is cut off past 10 MiB, LCD `txs/{hash}` past 13 MiB, `block_results` and the
-`tx.height=N` search past 32 MiB, RPC `block` past 9 MiB and LCD blocks past 18 MiB
-(declared larger: `502`; streamed past it: the connection is aborted). The backend
-has no ceiling. This is a backstop: the node has built the whole answer before the
-edge counts a byte. What bounds the build is the chain (chain `app/resultcap`):
+`tx` is cut off past 22 MiB, LCD `txs/{hash}` past 25 MiB, `block_results` past
+32 MiB, the `tx.height=N` search past 46 MiB, RPC `block` past 9 MiB and LCD blocks
+past 18 MiB (declared larger: `502`; streamed past it: the connection is aborted). The
+backend has no ceiling. This is a backstop: the node has built the whole answer before
+the edge counts a byte. What bounds the build is the chain (chain `app/resultcap`),
+which counts a result's bytes at their worst-case JSON size (an escaped `<` is 6):
 
 - block `max_bytes` 4 MiB and `max_gas` 100M (genesis), and a default node admitting
   txs of up to 1 MiB;
-- a tx with any msg that is not a relay msg stores at most 1 MiB of msg results
-  (`MaxTxResultBytes`), plus its ante events and a log cut to 1 KiB;
+- a tx with any msg that is not a relay msg: at most 1 MiB counted
+  (`MaxTxResultBytes`), ~3.4 MB of JSON at worst, plus its ante events and a log cut
+  to 1 KiB;
 - a relay tx (only packet receives, acks, timeouts and client updates: what a
-  relayer sends) has no byte cap, only gas: 8 KiB free plus 1 byte per 20 gas, about
-  5 MB at the block's gas; a block's results are about 10 MB at worst.
+  relayer sends, and anyone can send on a channel of their own): no byte cap, only
+  gas, 8 KiB free plus 1 byte per 20 gas, about 5 MB counted at the block's gas;
+- JSON structure is not counted: an answer is at most 3.3x what was counted
+  (`JSONPerCountedByteX10`), so a relay tx's answer is up to ~16.5 MB of JSON plus
+  the tx, and a block's results up to ~21.5 MB (measured by the chain's
+  `TestResultCapWorstCase`; no constant states it).
 
-The single-tx and single-block ceilings are computed from those numbers in
-`edge/filter/forward.go` (the largest JSON answer they allow, a quarter more,
-rounded up to a MiB) from mirrors in `edge/filter/chaincaps.go`, and
-`edge/conformance` reads the same numbers from the pinned chain's source and
-genesis: a mirror that differs, or a constant the chain renamed or removed, fails,
-and so does a ceiling under the largest answer it recomputes. Not sized to fit:
-a relay tx's answer (up to ~29 MiB of JSON) and `block_results` of a block built to
-be large (up to ~60 MB). Their public reads are cut; relayers read the node inside
-the lease, and the indexer (the backend) has no ceiling.
+Every ceiling is above the largest answer those allow, relay txs included, so
+nothing the chain can produce is cut. The single-tx and single-block ceilings are
+computed in `edge/filter/forward.go` (the largest answer, a quarter more, rounded up
+to a MiB) from mirrors in `edge/filter/chaincaps.go`; `edge/conformance` reads the
+same numbers from the pinned chain's source and genesis, and fails on a mirror that
+differs, a constant the chain renamed or removed, or a ceiling under the largest
+answer it recomputes.
 
-**Shedding.** A tx by hash and a given height's `block_results` are fixed answers.
-Once one has passed its ceiling, the edge remembers the hash or height (with the
-answer's form: RPC, RPC with `prove`, LCD) for 10 minutes and answers `502` to public
-requests for it without asking the node, so an oversized answer is built at most once
-per form per 10 minutes for everyone together, however often it is asked for. Only
-the key and an expiry are held, at most 4,096 of them, in memory (NO_LOGS.md); the
-backend is never shed. `block_results` without a height (the latest block) is not
-shed. The `bulk` class and the per-client bound limit how many builds run at once.
+**Heavy answers.** A tx by hash and a given height's `block_results` are fixed
+answers, and a heavy tx can be bought once (1 MiB counted for ~0.1 ERTH of gas, a
+relay tx's ~5 MB for ~0.5 ERTH) and then asked for for free. So the edge remembers,
+by hash or height and the answer's form (RPC, RPC with `prove`, LCD), what an answer
+turned out to be, for 10 minutes:
+
+- over 1 MiB: public requests for that tx are served from the `bulk` class (2 slots,
+  1 per client), not `txhash`, so asking for it again and again cannot hold the
+  slots wallet commit polls use; it is built in `txhash` once per form per 10
+  minutes for everyone together;
+- over its ceiling (only if the numbers above are wrong): public requests get
+  `502` without asking the node.
+
+Only the key, the mark and an expiry are held, at most 4,096 entries, in memory
+(NO_LOGS.md). The backend is never moved or refused. `block_results` without a
+height (the latest block) is not keyed.
 
 A changed allowlist or cap is a change to `edge/filter/`
 here, with a case in its tests, then `bin/build-edge.sh --pin`; it goes onto the lease

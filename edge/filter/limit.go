@@ -241,29 +241,32 @@ const holdCeiling = 3 * time.Minute
 // memory several times over (round-6 R6-E-1 measured ~6x), and each also
 // has a byte ceiling (forward.go, fwdOpts.maxResp). Neither stops the
 // node's build of one answer: what bounds the build is the chain's result
-// caps (chaincaps.go: 1 MiB of msg results for a tx with any non-relay msg;
-// a relay tx only by gas, ~5 MB at the block's 100M; ~10 MB per block).
-// What keeps those builds few: the class sizes, the per-client bound (one
-// address holds at most 1 bulk and 2 txhash slots), and shedding (shed.go:
-// an answer once found over its ceiling is not built again for the public).
+// caps, counted at JSON size (chaincaps.go, forward.go: a tx with any
+// non-relay msg ~3.4 MB of JSON at worst, a relay tx ~16.5 MB, a block's
+// results ~21.5 MB). What keeps those builds few: the class sizes, the
+// per-client bound (one address holds at most 1 bulk and 2 txhash slots),
+// and the answer memory (shed.go): a tx answer once seen heavy is served
+// from bulk, and one over its ceiling not at all.
 //
-//   - bulk: block_results. One block's results, up to ~10 MB of proto for
-//     a block built to be large: few at a time, and the backend (the
-//     indexer) keeps a slot.
+//   - bulk: block_results, and every tx by hash whose answer is known to
+//     be heavy (over heavyAnswer, shed.go). The answers the chain lets be
+//     megabytes: few at a time, and the backend (the indexer) keeps a
+//     slot.
 //   - txhash: one tx by hash (RPC tx, LCD txs/{hash}). It is what every
 //     wallet's commit poll and activity refresh calls, almost always a
 //     millisecond point read. It has its own slots so that anonymous
 //     block_results reads, however heavy, cannot make a committed tx look
-//     unconfirmed (round-7 R7-D-1). A tx built to be heavy (1 MiB of results
-//     for ~21M gas, ~0.1 ERTH) still costs a build per request, so one
-//     address may hold only 2 of the 8 slots; a relay tx heavier than the
-//     ceiling (up to ~5 MB of results for 100M gas, ~0.5 ERTH) is built
-//     once per shedTTL per form (RPC, RPC with prove, LCD) for everyone
-//     together.
+//     unconfirmed (round-7 R7-D-1). A tx can be bought heavy (1 MiB
+//     counted for ~21M gas, ~0.1 ERTH; a relay tx on the buyer's own
+//     channel, ~5 MB counted for 100M gas, ~0.5 ERTH) and then asked for
+//     for free, so a tx answer seen heavier than heavyAnswer is moved to
+//     bulk (shed.go): it is built in txhash once per form (RPC, RPC with
+//     prove, LCD) per shedTTL, for everyone together, and a client holds
+//     at most 2 of the 8 slots meanwhile.
 type Classes struct {
 	light     *class // point reads that do not touch the app: status, a block, a commit
 	results   *class // block ranges (headers), genesis_chunked: larger bodies of fixed size
-	bulk      *class // block_results: one block's results, sized by chain data (above)
+	bulk      *class // block_results, and tx answers seen heavy: sized by chain data (above)
 	txhash    *class // RPC tx, LCD txs/{hash}: one tx, sized by the chain's result caps
 	query     *class // LCD gRPC GETs: run outside the ABCI mutex, metered by query gas
 	abciQuery *class // RPC abci_query, abci_info: under the ABCI mutex
@@ -271,7 +274,7 @@ type Classes struct {
 	simulate  *class // LCD simulate: CPU (proofs, contract code), outside the mutex
 	search    *class // the LCD tx search, tx.height=N only: one block's txs
 
-	oversized *shedList // answers known to be over their ceiling (shed.go)
+	answers *shedList // answers known to be heavy or over their ceiling (shed.go)
 
 	backendAuth []byte // SHA-256 of the backend's exact Authorization value; nil: no backend
 }
@@ -292,9 +295,9 @@ func DefaultClasses() *Classes {
 	// phone polls at most 20 times per tx, and the activity refresh a few
 	// hashes at a time). A tx's answer is sized by what it stored, which
 	// the chain bounds (forward.go, the answer ceilings); a client asking
-	// for the heaviest txs holds at most 2 of the 8, an answer once found
-	// over its ceiling is refused without asking the node again (shed.go),
-	// and block_results does not compete for these slots. Every slot
+	// for heavy txs holds at most 2 of the 8, a tx once seen heavy is
+	// served from bulk (shed.go), and block_results does not compete for
+	// these slots. Every slot
 	// together is 64, the transport's MaxConnsPerHost
 	// (TestSlotsFitConnections); light gave up the slots txhash needed (its
 	// calls do not touch the app).
@@ -308,7 +311,7 @@ func DefaultClasses() *Classes {
 		broadcast: newClass("broadcast", 1, 1, 1, 4*time.Second, 20*time.Second),
 		simulate:  newClass("simulate", 2, 1, 1, 4*time.Second, 30*time.Second),
 		search:    newClass("search", 1, 0, 1, w, 10*time.Second),
-		oversized: newShedList(shedTTL, shedMax),
+		answers:   newShedList(shedTTL, shedMax),
 	}
 }
 
