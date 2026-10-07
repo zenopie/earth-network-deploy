@@ -21,6 +21,7 @@ Run the steps in order. Each **Check** must pass before the next step.
 | Backend | v3.0.0 on lease `1790918719150` (provider `akash1aaul837r7en7hpk9wv2svg8u78fdq0t2j2e82z`), idle. Replaced in section 4. |
 | Web | v2.0.0 on lease `1787052820013`, served at `erth.network`. Redeployed in section 5. |
 | `akash/genesis.sha256` | Pins `acb96128…`, the chain repo's `networks/genesis.json` at `6d3500a`, a **pre-ceremony** genesis that is already stale: the chain repo's genesis is `34fe7441…` at `20a91c6`, and it will change again with every chain commit that touches genesis inputs until the ceremony. So `bin/check-genesis.sh --chain` FAILS the pin now, with or without `--allow-placeholder`; that is expected. Nothing is pinned until the ceremony's genesis exists: section 2, step 4 writes its sha256 here, and from then on the pin and the launch tag's `genesis.json` must match. |
+| Edge image | Not built. `akash/deploy.yaml` carries the all-zero placeholder digest for `ghcr.io/zenopie/earth-network-edge`, which every build that pins the node refuses; section 1.4 builds, pushes and pins it. `edge/conformance/chain.pin` names chain `0767700` (privacy/orchard, not yet pushed: fetch with `EARTH_CHAIN_SRC`). |
 
 **One node.** The validator is also the full-history node: it serves
 `rpc.erth.network` and `lcd.erth.network` through its tunnel, and the privacy indexer
@@ -45,16 +46,39 @@ reads `block_results` from it from height 1. There is no separate archive lease.
      app-signing fingerprint for `/ref/<handle>` App Links.
    - The verifying keys in the genesis must be the ones these builds prove against.
 3. **Chain release candidate**: everything merged, `make genesis-check` and the test
-   suite green, the edge filter's too (`docker/edge`, and its `conformance` module;
-   the image carries `earth-edge`, which the SDL's `edge` service runs). The tag is cut at the ceremony (section 2), because the genesis is
+   suite green. The tag is cut at the ceremony (section 2), because the genesis is
    baked into the image.
-4. **Backend release** with `EARTHD_VERSION` / `EARTHD_SHA256` (backend `Dockerfile`)
+4. **The edge filter checked against that chain, built and pinned.** earth-edge lives
+   in this repo (`edge/`) and ships as its own image, not in the node's:
+   - Point `edge/conformance/chain.pin` at the release candidate's commit (the launch
+     tag's, once cut; the protos must be the ones the node serves), then
+
+         edge/conformance/fetch-chain.sh       # EARTH_CHAIN_SRC=<chain clone> before it is pushed
+         (cd edge && go vet ./... && go test ./...)
+         (cd edge/conformance && CI=1 go test ./...)
+
+     all green, `CI=1` so nothing skips. A conformance failure is the filter's
+     allowlist drifting from the chain's routes or versions: fix `edge/` in the same
+     commit as the pin.
+   - `docker login ghcr.io` (a token with `write:packages`), then
+     `bin/build-edge.sh --pin`: it builds `edge/Dockerfile` for linux/amd64 from the
+     committed `edge/` (the filter's tests run in the build), pushes
+     `ghcr.io/zenopie/earth-network-edge:<commit>`, checks that an anonymous pull
+     resolves to the digest it pushed (the package must be **public**, or the
+     provider cannot pull it: GitHub → Packages → earth-network-edge → settings →
+     visibility), and writes `…@sha256:<digest>` into the `edge` service of
+     `akash/deploy.yaml`. Commit that line. `build-sdl.py` refuses the all-zero
+     placeholder, a tag, or a `command` on `edge`.
+   - Any later change to `edge/` or to `chain.pin` repeats both steps, and goes out
+     with `bin/deploy.sh` like any SDL change (an image change on `edge` only; the
+     node's volume is untouched).
+5. **Backend release** with `EARTHD_VERSION` / `EARTHD_SHA256` (backend `Dockerfile`)
    bumped to the launch tag. `/gas/register` runs `earthd gas-check registration`,
    the chain's own check: an older binary cannot check the new formats. So this
    release follows the chain tag (section 4.1).
-5. **Web app release** from its release branch: `npm run build` and `npm run check`
+6. **Web app release** from its release branch: `npm run build` and `npm run check`
    pass (`check:dex-live` needs the chain; run it after launch).
-6. **Docs**: the docs release branch, with the `TODO(relaunch)` placeholders in
+7. **Docs**: the docs release branch, with the `TODO(relaunch)` placeholders in
    `docs/run-a-node/join.md` (launch tag, genesis sha256, node id, P2P address) filled
    in once sections 2 and 3 have the values. Published at launch.
 
@@ -240,7 +264,8 @@ chain tunnel (one token, one live connector).
    `bin/check-edge.py` (exit 0, every line `ok`) and that section's manual checks; a
    missing `X-Earth-Edge` or a `tx_search` that answers means a hostname points at the
    node. Keep `bin/check-edge.py` on a schedule from then on. The node-side limits are
-   in the SDL too (`limits:`, `index:` and `edge:` lines of the dry run, `rpc_subs=0`).
+   in the SDL too (`limits:`, `index:` and `edge:` lines of the dry run, `rpc_subs=0`);
+   its `edge image:` line must be the digest section 1.4 pinned.
 5. **Cloudflare no-logs settings** (NO_LOGS.md, "Cloudflare settings"): no Logpush
    job, Web Analytics and Network Error Logging off, no Zaraz or Workers, Browser
    Integrity Check and Security Level off for the API hostnames, WAF rules on Block,
@@ -301,8 +326,9 @@ grant history.
    `CHAIN_EDGE_TOKEN is unset`, the backend works but its re-index and grant bursts
    meet `429`s; if grants fail with gas-check unavailable and a `403 … refused by the
    edge filter`, gas-check made a call the filter does not serve (a chain change to
-   what gas-check reads needs the filter's `subspaceRules`/`storeKeyModules` updated
-   in the same release).
+   what gas-check reads needs `subspaceRules`/`storeKeyModules` in `edge/filter/`
+   updated, and the edge image rebuilt and re-pinned (section 1.4), before that chain
+   release is deployed).
 6. **Purge the circuit cache once.** Backends before this release served
    `/circuits/<variant>.json.gz` as `immutable` for a year, and all 17 circuits
    changed under those names, so a Cloudflare colo may still hold an old build.

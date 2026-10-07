@@ -6,15 +6,21 @@ token behind it.
 
 The chain itself is public at `zenopie/earth-network-chain`: node software, genesis,
 Dockerfile, and the entrypoint that lets anyone run a node. Nothing here is needed to
-*join* the network; it is only needed to operate this deployment.
+*join* the network; it is only needed to operate this deployment. That includes the
+request filter in front of the public RPC and LCD (`edge/`): it is this operator's
+infrastructure, not node software, so it lives and is built here.
 
     RELAUNCH.md             the runbook for launching earth-1 from a fresh genesis
     akash/deploy.yaml       the deployed unit (node, edge filter, cloudflared, relayer)
+    edge/                   earth-edge, the request filter: its own Go module and image
+    edge/conformance/       its checks against CometBFT, grpc-gateway and the chain's
+                            protos, at the chain commit in chain.pin (fetch-chain.sh)
     akash/README.md         how the lease behaves, and what destroys it
     akash/REMOTE_SIGNER.md  moving the consensus key behind tmkms
     akash/genesis.sha256    the genesis we mean to run (pinned by hand)
     bin/check-genesis.sh    a release's / checkout's genesis vs that pin
     bin/digest.sh           resolve a released tag to its image digest
+    bin/build-edge.sh       build + push the edge image, print (--pin: write) its digest
     bin/build-sdl.py        SDL + digest + secrets -> the copy that gets sent
     bin/create.sh           a NEW lease (new volume: the chain starts at height 1)
     bin/deploy.sh           update the lease in place (keeps the volumes)
@@ -58,9 +64,16 @@ push meant one of them lost.
 
 So the digest is read from the registry at deploy time. `bin/digest.sh` takes a tag
 and returns `ghcr.io/...@sha256:...`, using no credentials: the package has to be
-public anyway or the Akash provider could not pull it. The `image:` line committed in
-`akash/deploy.yaml` is a placeholder; what runs is what `deploy.sh` / `create.sh`
-pinned.
+public anyway or the Akash provider could not pull it. The node's and relayer's
+`image:` lines committed in `akash/deploy.yaml` are placeholders; what runs is what
+`deploy.sh` / `create.sh` pinned.
+
+The edge is the exception: its image is built from this repo, so its digest is
+committed in `akash/deploy.yaml` by `bin/build-edge.sh --pin` (RELAUNCH.md 1.4), and
+the node pin does not touch it.
+
+    (cd edge && go test ./...)                                        # the filter
+    edge/conformance/fetch-chain.sh && (cd edge/conformance && go test ./...)
 
 ## Secrets
 

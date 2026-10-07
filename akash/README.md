@@ -11,15 +11,27 @@ The backend (gas grants and the privacy indexer) is a separate repo, image and l
 (`earth-network-backend`), with its own tunnel. Closing a lease destroys its volumes,
 and this one holds the chain's state: a backend change must not be able to take it.
 The image's entrypoint (`docker/entrypoint.sh` in the chain repo) installs the baked
-genesis, checks its sha256, and starts `earthd` under cosmovisor. The same image
-carries `earth-edge`, which the `edge` service runs instead.
+genesis, checks its sha256, and starts `earthd` under cosmovisor. The relayer runs
+the same image. `edge` runs its own (below).
 
-## The image
+## The images
 
-CI in the chain repo builds and pushes on `v[0-9]+.[0-9]+.[0-9]+` tags only. The
-digest is not committed here: `bin/digest.sh <tag>` reads it from the registry at
-deploy time, and `bin/deploy.sh` / `bin/create.sh` pin the submitted copy to it. The
-package must be public on ghcr.io, or the provider cannot pull it.
+**node and relayer:** CI in the chain repo builds and pushes on
+`v[0-9]+.[0-9]+.[0-9]+` tags only. The digest is not committed here:
+`bin/digest.sh <tag>` reads it from the registry at deploy time, and
+`bin/deploy.sh` / `bin/create.sh` pin the submitted copy to it (only the lines
+naming that repository).
+
+**edge:** built from this repo's `edge/` (`edge/Dockerfile`: a static binary on
+`scratch`, uid 65532, nothing else) by `bin/build-edge.sh --pin`, which pushes
+`ghcr.io/zenopie/earth-network-edge:<commit>` and writes its digest into
+`akash/deploy.yaml`. That digest **is** committed: it names a commit of this repo,
+not a chain release. `build-sdl.py` refuses the all-zero placeholder in any build
+that pins the node, a tag instead of a digest, and a `command` or `args` on `edge`.
+RELAUNCH.md 1.4 is the procedure, including the conformance run against the chain
+commit `edge/conformance/chain.pin` names.
+
+Both packages must be public on ghcr.io, or the provider cannot pull them.
 
 ## Deploy
 
@@ -92,8 +104,8 @@ each doing the one thing it can do exactly:
            -> cloudflared -> edge (earth-edge: allowlist, per-class caps)
            -> node (query-gas limit, connection caps)
 
-**The filter, `edge`.** earth-edge (chain repo `docker/edge`, built into the node's
-image and run as its own service, `akash/deploy.yaml`) is the only thing the public
+**The filter, `edge`.** earth-edge (`edge/` in this repo, its own image, run as
+its own service, `akash/deploy.yaml`) is the only thing the public
 hostnames reach; the node's 26657 and 1317 are published to it alone. It replaced a
 Cloudflare allowlist that read the URI, which could not be made to agree with the
 node: CometBFT decodes an `abci_query` argument a second time (`0x` hex, JSON `\u`
@@ -205,9 +217,12 @@ class's deadline but the slot stays taken until then.
 
 Together at most 63 calls at the node, under its 100 RPC and 200 API connection caps;
 at most 3 of them hold or queue on the ABCI mutex, so a consensus step waits behind at
-most three bounded calls. A changed allowlist or cap is a chain-repo change
-(`docker/edge`, with a case in its tests) and a new image; it goes onto the lease with
-an in-place PUT like any image change.
+most three bounded calls. A changed allowlist or cap is a change to `edge/filter/`
+here, with a case in its tests, then `bin/build-edge.sh --pin`; it goes onto the lease
+with an in-place PUT (`bin/deploy.sh`) like any image change. A chain release that
+adds or changes a route a client needs, or changes what gas-check reads, needs this
+before it is deployed: bump `edge/conformance/chain.pin`, run the conformance tests,
+fix the filter, rebuild.
 
 ### The backend's credential
 
