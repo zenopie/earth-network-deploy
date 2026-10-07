@@ -1,0 +1,5 @@
+# Only what node/Dockerfile copies. The tests and the base pin stay out.
+*
+!entrypoint.sh
+!relayer.sh
+!drop-root.sh

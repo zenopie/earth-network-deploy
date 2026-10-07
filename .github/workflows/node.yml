@@ -1,0 +1,22 @@
+# The node image's entrypoint (node/entrypoint.sh) and relayer script, without
+# a container: earthd and cosmovisor are stubbed.
+name: node
+on:
+  push:
+    paths: ["node/**", ".github/workflows/node.yml"]
+  pull_request:
+    paths: ["node/**", ".github/workflows/node.yml"]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: syntax
+        run: |
+          bash -n node/entrypoint.sh
+          sh -n node/relayer.sh
+          sh -n node/drop-root.sh
+      - name: entrypoint
+        run: node/entrypoint_test.sh
