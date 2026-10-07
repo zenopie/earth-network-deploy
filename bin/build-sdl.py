@@ -74,6 +74,10 @@ EXPECTED_CONSENSUS_PUBKEY = "PGqvPN4CxEkxvvh3tSBX0SGeBgjMdqQwZkdHt8FRLm4="
 # scripts/ceremony.sh USED_CONSENSUS_KEYS).
 USED_CONSENSUS_PUBKEYS = {"kTMzoCBEj1g2z49K1D/jxuLGrhTsnzfTx6Gf1LnBUJw="}
 no_statesync = args.no_statesync
+# earth-edge's image (edge/, bin/build-edge.sh). The SDL pins it by digest
+# in the file; the all-zero digest is the placeholder before the first build.
+EDGE_IMAGE_REPO = "ghcr.io/zenopie/earth-network-edge"
+EDGE_PLACEHOLDER = "sha256:" + "0" * 64
 # Without --fullnode this script used to inject VALIDATOR_MNEMONIC after a
 # VALIDATOR_BONDED line for a DEV_INIT devnet. akash/deploy.yaml has no such line
 # on purpose, so the mnemonic never reaches a lease: refuse up front.
@@ -111,9 +115,14 @@ s = open(os.path.join(repo, args.sdl)).read()
 
 # Pin the image at deploy time rather than at build time. The chain repo used to
 # rewrite this and commit it back; it no longer knows this file exists.
+# Only the lines naming the digest's own repository (the node and the relayer):
+# the edge runs a different image, pinned in the file by bin/build-edge.sh.
 if digest:
-    s, n = re.subn(r'(?m)^(\s*image:\s*)ghcr\.io/\S+', r'\1' + digest, s)
-    assert n, "no ghcr image line to pin"
+    dm = re.fullmatch(r"(ghcr\.io/[a-z0-9._/-]+)@sha256:[0-9a-f]{64}", digest)
+    assert dm, "digest %r is not ghcr.io/<repo>@sha256:<64 hex>" % digest
+    assert dm.group(1) != EDGE_IMAGE_REPO, "the node digest names the edge's repository"
+    s, n = re.subn(r'(?m)^(\s*image:\s*)' + re.escape(dm.group(1)) + r'[@:]\S+', r'\g<1>' + digest, s)
+    assert n, "no %s image line to pin" % dm.group(1)
     print("pinned %d image line(s) to %s" % (n, digest.split("@")[-1][:19] + "…"))
 
 # A --fullnode SDL without --validator-key describes a node that must not be
@@ -417,8 +426,9 @@ if "relayer" in svcs:
 # filter (akash/README.md, "Public RPC and LCD"; R4-E-1..3). Its allowlist
 # is what protects the signer now; Cloudflare only rate-limits. So: the
 # node's 26657 and 1317 are published to `edge` alone, `edge` to
-# `cloudflared` alone, neither on a provider port, and `edge` runs the
-# node's own image as `earth`.
+# `cloudflared` alone, neither on a provider port, and `edge` runs its own
+# image, pinned by digest, with no command override (the image's USER 65532
+# and ENTRYPOINT /earth-edge; edge/Dockerfile).
 def expose_map(name):
     return {e["port"]: e.get("to") or [] for e in (svcs[name].get("expose") or [])}
 
@@ -431,26 +441,33 @@ for port in (26657, 1317):
         "edge port %d must be published to service cloudflared only, has %r" % (port, ee.get(port)))
 assert set(ee) == {26657, 1317}, "edge publishes only 26657 and 1317, has %r" % sorted(ee)
 ed = svcs["edge"]
-assert ed["image"] == img, "edge must run the node's image (the pinned digest covers it)"
-ecmd = ed.get("command") or []
-assert ecmd[:1] == ["setpriv"] and "--reuid=earth" in ecmd and ecmd[-1:] == ["/usr/local/bin/earth-edge"], (
-    "edge must run /usr/local/bin/earth-edge under setpriv --reuid=earth, has %r" % ecmd)
+em = re.fullmatch(re.escape(EDGE_IMAGE_REPO) + r"@(sha256:[0-9a-f]{64})", ed["image"])
+assert em, "edge image must be %s@sha256:<64 hex> (pinned by digest, not a tag), has %r" % (
+    EDGE_IMAGE_REPO, ed["image"])
+assert em.group(1) != EDGE_PLACEHOLDER, (
+    "edge image is the placeholder digest: run bin/build-edge.sh --pin and commit (RELAUNCH.md 1.4)")
+# No command or args: what runs is the image's ENTRYPOINT as its USER, both
+# fixed by the digest. An override could run something else, or as root.
+assert not ed.get("command") and not ed.get("args"), (
+    "edge must not override the image's command or args (it runs /earth-edge as uid 65532), has %r"
+    % {k: ed[k] for k in ("command", "args") if ed.get(k)})
 e = envmap("edge")
 assert e.get("EDGE_RPC_UPSTREAM") == "http://node:26657" and e.get("EDGE_LCD_UPSTREAM") == "http://node:1317", (
     "edge upstreams must be the node: %r" % {k: v for k, v in e.items() if k.endswith("UPSTREAM")})
-assert set(e) <= {"EDGE_RPC_UPSTREAM", "EDGE_LCD_UPSTREAM", "EDGE_RPC_LISTEN", "EDGE_LCD_LISTEN",
-                  "EDGE_MAX_CONNS", "GOMAXPROCS", "GOMEMLIMIT", "EDGE_BACKEND_AUTH_SHA256"}, (
-    "edge carries env it has no use for: %r" % sorted(set(e) - {"EDGE_RPC_UPSTREAM"}))
+EDGE_ENV = {"EDGE_RPC_UPSTREAM", "EDGE_LCD_UPSTREAM", "EDGE_RPC_LISTEN", "EDGE_LCD_LISTEN",
+            "EDGE_MAX_CONNS", "GOMAXPROCS", "GOMEMLIMIT", "EDGE_BACKEND_AUTH_SHA256"}
+assert set(e) <= EDGE_ENV, "edge carries env it has no use for: %r" % sorted(set(e) - EDGE_ENV)
 assert e.get("GOMAXPROCS") and e.get("GOMEMLIMIT"), "edge needs GOMAXPROCS and GOMEMLIMIT (bounded runtime)"
 if "EDGE_BACKEND_AUTH_SHA256" in e:
     assert re.fullmatch(r"[0-9a-f]{64}", e["EDGE_BACKEND_AUTH_SHA256"]), "EDGE_BACKEND_AUTH_SHA256 is not a sha256"
 # The edge's memory: its body budget is 48 + 16 MiB, under GOMEMLIMIT, under
-# the profile (docker/edge/filter/body.go). Keep the three in that order.
+# the profile (edge/filter/body.go). Keep the three in that order.
 emem = d["profiles"]["compute"]["edge"]["resources"]["memory"]["size"]
 assert emem == "192Mi" and e["GOMEMLIMIT"] == "160MiB", (
     "edge memory %r / GOMEMLIMIT %r: the body budget (64 MiB) is sized against 192Mi/160MiB" % (emem, e["GOMEMLIMIT"]))
 print("services:   ", ", ".join(sorted(svcs)))
-print("node image: ", img, "(edge: same)")
+print("node image: ", img)
+print("edge image: ", ed["image"])
 print("edge:        rpc/lcd -> %s, %s  GOMAXPROCS=%s GOMEMLIMIT=%s backend reserve=%s" % (
       e["EDGE_RPC_UPSTREAM"], e["EDGE_LCD_UPSTREAM"], e["GOMAXPROCS"], e["GOMEMLIMIT"],
       "yes" if e.get("EDGE_BACKEND_AUTH_SHA256") else "NO"))
