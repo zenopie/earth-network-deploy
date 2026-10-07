@@ -482,7 +482,10 @@ if "relayer" in svcs:
 # node's 26657 and 1317 are published to `edge` alone, `edge` to
 # `cloudflared` alone, neither on a provider port, and `edge` runs its own
 # image, pinned by digest, with no command override (the image's USER 65532
-# and ENTRYPOINT /earth-edge; edge/Dockerfile).
+# and ENTRYPOINT /earth-edge; edge/Dockerfile). earth-edge's per-client
+# limits also rest on this: it trusts CF-Connecting-IP because only
+# cloudflared, carrying Cloudflare's requests, can reach it
+# (edge/filter/client.go).
 def expose_map(name):
     return {e["port"]: e.get("to") or [] for e in (svcs[name].get("expose") or [])}
 

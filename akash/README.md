@@ -132,7 +132,7 @@ The filter:
   CometBFT's own handlers and its routes against every gateway binding in the SDK's
   and the chain's protos;
 - **caps each cost class** (below): however many expensive calls arrive, at most a
-  few reach the signer at once; the rest get `503` at once. A slot is held until the
+  few reach the signer at once; the rest get `503`. A slot is held until the
   node has answered, not until the client gives up: the node cannot be told to stop
   a query, so a slot freed at a timeout would let the work pile up (R5-E-1, R5-E-3);
 - **lets through only calls whose cost is bounded**, not only calls of an allowed
@@ -153,8 +153,9 @@ The filter:
 - bounds bodies (1 MiB each; read before any slot is taken, under a deadline of
   2 s + 128 KiB/s of their size; charged, copies included, to a 48 MiB byte budget,
   16 MiB for the backend, until answered; reserved in chunks that grow with what
-  has arrived, starting at 4 KiB, so a silent body holds 24 KiB), headers (16 KiB) and time, keeps
-  **no per-client state**,
+  has arrived, starting at 4 KiB, so a silent body holds 24 KiB), headers (16 KiB) and time,
+  keeps **no per-client state but an in-memory count** of each client's requests in
+  flight per class (below; deleted when it reaches zero, NO_LOGS.md),
   passes the node only `Origin`, `Accept`, the CORS preflight headers and (LCD)
   `x-cosmos-block-height`, and **logs no request** (NO_LOGS.md);
 - answers a refusal with `403` and `refused by the edge filter: <reason>` in the
@@ -226,17 +227,37 @@ answer streams to the client, but a client that stops reading is cut off after 1
 without progress (45 s for the whole answer), and the slot is freed as soon as the
 node's answer has been read to its end.
 
-| Class | What | Public | Backend | Waits |
-| --- | --- | --- | --- | --- |
-| light | status, block, commit, validators, consensus_params, LCD blocks, preflights | 12 | +3 | 2 s |
-| results | blockchain, genesis_chunked | 8 | +4 | 2 s |
-| bulk | `block_results` (one block's results, up to ~10 MB for a block built to be large) | 2 | +1 | 2 s |
-| txhash | a tx by hash: RPC `tx`, LCD `txs/{hash}` (wallet commit polls, activity refresh) | 8 | +2 | 2 s |
-| query | LCD gRPC GETs (outside the ABCI mutex, metered by query gas) | 12 | +4 | 2 s |
-| abci-query | RPC `abci_query` (gRPC paths and `/store/` reads), `abci_info`: ABCI mutex | 1 | +1 | 4 s |
-| broadcast | `broadcast_tx_sync`/`_async`, LCD POST txs (CheckTx): ABCI mutex | 1 | +1 | 4 s |
-| simulate | LCD simulate (CPU outside the mutex, bounded by `simulation_gas_limit`) | 2 | +1 | 4 s |
-| search | LCD tx search, `tx.height=N` only | 1 | 0 | 2 s |
+| Class | What | Public | Per client | Backend | Waits |
+| --- | --- | --- | --- | --- | --- |
+| light | status, block, commit, validators, consensus_params, LCD blocks, preflights | 12 | 3 | +3 | 2 s |
+| results | blockchain, genesis_chunked | 8 | 2 | +4 | 2 s |
+| bulk | `block_results` (one block's results, up to ~10 MB for a block built to be large) | 2 | 1 | +1 | 2 s |
+| txhash | a tx by hash: RPC `tx`, LCD `txs/{hash}` (wallet commit polls, activity refresh) | 8 | 2 | +2 | 2 s |
+| query | LCD gRPC GETs (outside the ABCI mutex, metered by query gas) | 12 | 3 | +4 | 2 s |
+| abci-query | RPC `abci_query` (gRPC paths and `/store/` reads), `abci_info`: ABCI mutex | 1 | 1 | +1 | 4 s |
+| broadcast | `broadcast_tx_sync`/`_async`, LCD POST txs (CheckTx): ABCI mutex | 1 | 1 | +1 | 4 s |
+| simulate | LCD simulate (CPU outside the mutex, bounded by `simulation_gas_limit`) | 2 | 1 | +1 | 4 s |
+| search | LCD tx search, `tx.height=N` only | 1 | 1 | 0 | 2 s |
+
+**Per client** (round-8 R8-D-1) is how many requests one client may have in a
+class at once, holding a slot or queued for one; past it the request gets `503` at
+once. Slots are granted in arrival order. So two clients together hold at most half
+of any class of 4 or more slots, and in the 1- and 2-slot classes a third client's
+request is next after the requests already queued, at most one per other client
+(`edge/filter` `TestTwoClientsCannotStarveAThird`: txhash, bulk, both ABCI-mutex
+classes, light). Cloudflare's per-IP rate limits count requests, not what they hold,
+so this is what stops one or two addresses from keeping a class full with slow
+requests. The client is `CF-Connecting-IP`: the edge's ports are published to the
+lease's cloudflared only (`build-sdl.py` refuses anything else), and Cloudflare sets
+that header itself on every request it proxies, so the edge reads it as Cloudflare's
+word. IPv6 counts by /64. One clean IP address is used; no header, two, or garbage
+counts as the tunnel connection's own address, which every such request shares, so a
+bad header never buys a fresh allowance (`edge/filter/client.go`). Clients sharing
+an address (carrier NAT, an office) share its allowance; the allowance is
+concurrency, not rate, so ordinary wallet traffic (millisecond calls) rarely meets
+it. The backend's credential is exempt and keeps its reserve. The counts are in
+memory only, keyed by a keyed hash of the address, and a client's entry is deleted
+when its last request is answered (NO_LOGS.md).
 
 Together at most 64 calls at the node, under its 100 RPC and 200 API connection caps
 and within the edge's 64 connections per upstream (a test holds the classes to it).
