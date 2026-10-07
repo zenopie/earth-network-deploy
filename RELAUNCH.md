@@ -107,8 +107,10 @@ reads `block_results` from it from height 1. There is no separate archive lease.
    **public**. The build passes `akash/genesis.sha256` too: it fails unless the base
    image's baked genesis hashes to it, and labels the image with the base and that
    sha256. `bin/check-node-image.py` reads those labels back from the registry, after
-   the push and in every `deploy.sh` / `create.sh` before anything is sent, so the
-   `# FROM` comment cannot claim a base the image was not built on. So the genesis
+   the push and in every `deploy.sh` / `create.sh` before anything is sent, and
+   checks that the base image's layers (by content, `rootfs.diff_ids`) are the node
+   image's first layers, so neither the `# FROM` comment nor a label can claim a base
+   the image was not built on. So the genesis
    pin is written (section 2, step 4) before the node image is built. `build-sdl.py` refuses a release build (`deploy.sh` / `create.sh
    <tag>`) unless the tag's chain image is `node/base.pin` and both lines' `FROM`,
    and refuses the placeholder, the chain image itself, or a `command` on `node`.

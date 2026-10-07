@@ -20,7 +20,8 @@
 # The build passes akash/genesis.sha256 too: node/Dockerfile refuses a base
 # whose baked genesis differs, and labels the image with the base and the
 # genesis (bin/check-node-image.py, run here after the push and by deploy.sh
-# and create.sh, reads them back from the registry).
+# and create.sh, reads them back from the registry, and checks from the
+# registry's manifests that the base's layers are the image's first layers).
 #
 # Built from committed files only: node/ must be clean, and the tag is the
 # commit, so a digest always names a commit of this repo and, through
