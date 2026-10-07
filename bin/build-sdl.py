@@ -164,6 +164,27 @@ if want_relayer:
     line = line[:line.index("\n") + 1]
     s = s.replace(line, line + f"      - RELAYER_MNEMONIC={env['RELAYER_MNEMONIC']}\n")
 
+# edge: the backend's credential, as a hash (R5-E-7). The backend sends
+# `Authorization: Basic base64("earth-backend:" + CHAIN_EDGE_TOKEN)` to
+# rpc/lcd (backend services/edge.py); earth-edge gives a request whose header
+# hashes to this the slots reserved for the backend. Only the hash reaches the
+# provider. Required for the public node (--tunnel): without it the backend
+# shares every slot with anonymous traffic.
+BACKEND_USER = "earth-backend"
+anchor = "      - EDGE_LCD_LISTEN=:1317\n"
+assert s.count(anchor) == 1, "edge EDGE_LCD_LISTEN anchor moved"
+tok = env.get("CHAIN_EDGE_TOKEN", "")
+if tok:
+    assert re.fullmatch(r"[A-Za-z0-9_-]{32,128}", tok), (
+        "CHAIN_EDGE_TOKEN must be 32-128 characters of [A-Za-z0-9_-] (as the backend requires)")
+    hdr = "Basic " + base64.b64encode(("%s:%s" % (BACKEND_USER, tok)).encode()).decode()
+    s = s.replace(anchor, anchor + "      - EDGE_BACKEND_AUTH_SHA256=%s\n"
+                  % hashlib.sha256(hdr.encode()).hexdigest())
+else:
+    assert not want_tunnel, (
+        "--tunnel with no CHAIN_EDGE_TOKEN in .env: the public edge would reserve "
+        "nothing for the backend (R5-E-7). Put the backend's CHAIN_EDGE_TOKEN in .env.")
+
 open(out, "w").write(s)
 
 # Verify what we built rather than trusting the string edits.
@@ -310,6 +331,24 @@ for k, cap in (("EARTHD_RPC_MAX_OPEN_CONNECTIONS", 200),
                ("EARTHD_API_MAX_OPEN_CONNECTIONS", 400)):
     v = n.get(k, "")
     assert v.isdigit() and 0 < int(v) <= cap, f"{k} must be set to 1..{cap}, has {v!r}"
+# R5-E-1: no address events in the tx index. An address search is a
+# whole-history scan CometBFT cannot cancel; the edge serves only tx.height=N,
+# and this keeps a misrouted hostname or a direct caller from finding one.
+# Empty indexes everything, so it must be set, and to IBC packet keys only
+# (what an rly relayer searches by).
+ie = n.get("EARTHD_INDEX_EVENTS", "").split()
+assert ie, "EARTHD_INDEX_EVENTS must be set (empty indexes every event attribute, addresses included)"
+IBC_PACKET_TYPES = {"send_packet", "recv_packet", "write_acknowledgement", "acknowledge_packet", "timeout_packet"}
+IBC_PACKET_KEYS = {"packet_sequence", "packet_src_channel", "packet_dst_channel", "packet_src_port", "packet_dst_port"}
+for k in ie:
+    typ, _, attr = k.partition(".")
+    assert typ in IBC_PACKET_TYPES and attr in IBC_PACKET_KEYS, (
+        "EARTHD_INDEX_EVENTS entry %r: only IBC packet keys are indexed (an address key "
+        "makes every tx of that address one unbounded search)" % k)
+# R5-E-2: a simulate has no fee; unset, wasmd lets one burn the 100M block gas.
+sgl = n.get("EARTHD_WASM_SIMULATION_GAS_LIMIT", "")
+assert sgl.isdigit() and 0 < int(sgl) <= 20_000_000, (
+    "EARTHD_WASM_SIMULATION_GAS_LIMIT must be set to 1..20M (the chain default is 10M), has %r" % sgl)
 # R3-BD-1: no subscriptions at all. Nothing of ours subscribes, and a socket
 # is how tx_search got past Cloudflare's URI checks; the edge filter refuses
 # /websocket, and this is the node's own half of that.
@@ -400,13 +439,23 @@ e = envmap("edge")
 assert e.get("EDGE_RPC_UPSTREAM") == "http://node:26657" and e.get("EDGE_LCD_UPSTREAM") == "http://node:1317", (
     "edge upstreams must be the node: %r" % {k: v for k, v in e.items() if k.endswith("UPSTREAM")})
 assert set(e) <= {"EDGE_RPC_UPSTREAM", "EDGE_LCD_UPSTREAM", "EDGE_RPC_LISTEN", "EDGE_LCD_LISTEN",
-                  "EDGE_MAX_CONNS", "GOMAXPROCS", "GOMEMLIMIT"}, (
+                  "EDGE_MAX_CONNS", "GOMAXPROCS", "GOMEMLIMIT", "EDGE_BACKEND_AUTH_SHA256"}, (
     "edge carries env it has no use for: %r" % sorted(set(e) - {"EDGE_RPC_UPSTREAM"}))
 assert e.get("GOMAXPROCS") and e.get("GOMEMLIMIT"), "edge needs GOMAXPROCS and GOMEMLIMIT (bounded runtime)"
+if "EDGE_BACKEND_AUTH_SHA256" in e:
+    assert re.fullmatch(r"[0-9a-f]{64}", e["EDGE_BACKEND_AUTH_SHA256"]), "EDGE_BACKEND_AUTH_SHA256 is not a sha256"
+# The edge's memory: its body budget is 48 + 16 MiB, under GOMEMLIMIT, under
+# the profile (docker/edge/filter/body.go). Keep the three in that order.
+emem = d["profiles"]["compute"]["edge"]["resources"]["memory"]["size"]
+assert emem == "192Mi" and e["GOMEMLIMIT"] == "160MiB", (
+    "edge memory %r / GOMEMLIMIT %r: the body budget (64 MiB) is sized against 192Mi/160MiB" % (emem, e["GOMEMLIMIT"]))
 print("services:   ", ", ".join(sorted(svcs)))
 print("node image: ", img, "(edge: same)")
-print("edge:        rpc/lcd -> %s, %s  GOMAXPROCS=%s GOMEMLIMIT=%s" % (
-      e["EDGE_RPC_UPSTREAM"], e["EDGE_LCD_UPSTREAM"], e["GOMAXPROCS"], e["GOMEMLIMIT"]))
+print("edge:        rpc/lcd -> %s, %s  GOMAXPROCS=%s GOMEMLIMIT=%s backend reserve=%s" % (
+      e["EDGE_RPC_UPSTREAM"], e["EDGE_LCD_UPSTREAM"], e["GOMAXPROCS"], e["GOMEMLIMIT"],
+      "yes" if e.get("EDGE_BACKEND_AUTH_SHA256") else "NO"))
+print("index:        events=%d IBC packet keys, simulation_gas_limit=%s" % (
+      len(n["EARTHD_INDEX_EVENTS"].split()), n["EARTHD_WASM_SIMULATION_GAS_LIMIT"]))
 print("DEV_INIT:   ", n["DEV_INIT"], " CHAIN_ID:", n["CHAIN_ID"], " MIN_GAS:", n.get("MIN_GAS_PRICES"),
       " mempool.max-txs:", n.get("EARTHD_MEMPOOL_MAX_TXS"))
 print("limits:       query_gas=%s rpc_conns=%s rpc_subs=%s api_conns=%s rpc_unsafe=%s" % (

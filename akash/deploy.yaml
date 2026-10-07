@@ -208,6 +208,18 @@ services:
       - EARTHD_STORAGE_DISCARD_ABCI_RESPONSES=false
       # config.toml [tx_index]: index txs, so /tx and /tx_search answer.
       - EARTHD_TX_INDEX_INDEXER=kv
+      # app.toml index-events: which event attributes the kv indexer indexes.
+      # Empty (the SDK default) indexes every attribute, and every address
+      # event then becomes searchable, which is a whole-history scan on
+      # this signer: CometBFT loads every match of a search before it pages
+      # and cannot cancel it, and the fee collector is the recipient of every
+      # tx (round-5 R5-E-1). The edge filter serves only `tx.height=N`
+      # searches; this is the node's own half. Only the IBC packet keys an
+      # rly relayer searches by (docker/relayer.sh talks to node:26657
+      # directly) are indexed. tx.hash and tx.height are always indexed, so
+      # lookups by hash and per-block searches still answer.
+      # bin/build-sdl.py refuses an SDL without it, or with an address key.
+      - EARTHD_INDEX_EVENTS=send_packet.packet_sequence send_packet.packet_src_channel send_packet.packet_dst_channel recv_packet.packet_sequence recv_packet.packet_src_channel recv_packet.packet_dst_channel write_acknowledgement.packet_sequence write_acknowledgement.packet_src_channel write_acknowledgement.packet_dst_channel acknowledge_packet.packet_sequence acknowledge_packet.packet_src_channel acknowledge_packet.packet_dst_channel timeout_packet.packet_sequence timeout_packet.packet_src_channel timeout_packet.packet_dst_channel
       # Never state sync (no STATESYNC_* here; see "peers" above): state sync
       # floors a node at its trust height and CometBFT never backfills below it.
       #
@@ -247,10 +259,20 @@ services:
       # the SDK default, is unbounded). The largest legitimate query is the
       # backend's 1,000-entry Query/Handles page, a few million gas; 50M leaves
       # an order of magnitude over that and stops a query that walks a whole
-      # store at a historical height. Simulate is not affected. /store/ raw
-      # queries and tx search do not go through it (the edge filter narrows
-      # those to fixed reads and equality searches, a few at a time).
+      # store at a historical height. Simulate is not affected (see
+      # simulation_gas_limit). /store/ raw queries and tx search do not go
+      # through it (the edge filter narrows those to fixed reads and one
+      # block's txs, a few at a time).
       - EARTHD_QUERY_GAS_LIMIT=50000000
+      # app.toml [wasm] simulation_gas_limit: the gas a simulated signed tx
+      # may burn. A simulate needs no fee and no valid signature, and contract
+      # code burns ~1 ms of CPU per 7k gas, so unset (wasmd's fallback is the
+      # 100M block limit) one anonymous simulate could take ~15 s of the
+      # signer's CPU (round-5 R5-E-2). 10M is the chain's own default
+      # (app/ante.go) and ~5x a typical contract execute; private txs are not
+      # affected (their flat proof prices are simulated up to the block
+      # limit). bin/build-sdl.py refuses an SDL without it.
+      - EARTHD_WASM_SIMULATION_GAS_LIMIT=10000000
       # config.toml [rpc]: every client reaches 26657 through the edge filter
       # (whose own caps total well under this), so this caps concurrent RPC
       # requests (default 900).
@@ -392,14 +414,22 @@ services:
       - EDGE_LCD_UPSTREAM=http://node:1317
       - EDGE_RPC_LISTEN=:26657
       - EDGE_LCD_LISTEN=:1317
-      # Open client connections per listener. cloudflared multiplexes every
-      # client onto a few connections to it, so this bounds idle keep-alives.
+      # Open client connections per listener (cloudflared opens one per
+      # request in flight). ~20 KiB each, so 512 in all is ~10 MiB; a body
+      # holds its connection for at most 2 s + 128 KiB/s of its size.
       - EDGE_MAX_CONNS=256
       # One OS thread of Go, sized to the profile's 0.5 CPU, and a soft heap
-      # limit under its memory (request bodies are capped at 1 MiB and 16 are
-      # held at once, so the steady heap is a few MiB).
+      # limit under its memory. Request bodies are charged to a 48 MiB byte
+      # budget (16 MiB for the backend), copies included, until answered;
+      # past it the edge answers 503 (docker/edge/filter/body.go). A burst of
+      # 250 1 MiB broadcasts peaks at ~48 MiB of heap in the edge's test.
       - GOMAXPROCS=1
       - GOMEMLIMIT=160MiB
+      # EDGE_BACKEND_AUTH_SHA256 is added by bin/build-sdl.py: the SHA-256 of
+      # the backend's Authorization header (from CHAIN_EDGE_TOKEN in .env),
+      # never the token. Requests carrying it may use a few slots of each
+      # class reserved for the backend, so a public flood cannot starve gas
+      # grants or the indexer (R5-E-7).
     expose:
       - port: 26657
         as: 26657
