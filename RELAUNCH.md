@@ -355,6 +355,12 @@ chain tunnel (one token, one live connector).
    manual checks, some of which are scans). Keep `bin/check-edge.py` on a schedule from then on. The node-side limits are
    in the SDL too (`limits:`, `index:` and `edge:` lines of the dry run, `rpc_subs=0`);
    its `edge image:` line must be the digest section 1.4 pinned.
+   **Network → Pseudo IPv4 must be Off** (the default; "Add header" also works, never
+   "Overwrite headers"). The edge keys its per-client caps on `CF-Connecting-IP`, and
+   groups IPv6 clients by /64 (`edge/filter/client.go`). With "Overwrite headers",
+   Cloudflare replaces an IPv6 client's address there with a Class E IPv4 hashed from
+   it, so the edge keys each address alone and one IPv6 subscriber, who holds a whole
+   /64, gets a fresh set of slots per address (round-9 R9-D-2).
 5. **Cloudflare no-logs settings** (NO_LOGS.md, "Cloudflare settings"): no Logpush
    job, Web Analytics and Network Error Logging off, no Zaraz or Workers, Browser
    Integrity Check and Security Level off for the API hostnames, WAF rules on Block,
