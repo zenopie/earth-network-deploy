@@ -13,7 +13,11 @@
 # does not carry.
 #
 # CHAIN_IMAGE has no default: the build passes node/base.pin, so the base is
-# always a digest this repository names, never a tag.
+# always a digest this repository names, never a tag. GENESIS_SHA256 has none
+# either: the build passes akash/genesis.sha256, and the build fails unless
+# the base's baked genesis hashes to it. Both are written into the image's
+# labels (network.erth.base, network.erth.genesis-sha256), which
+# bin/check-node-image.py reads back from the registry before a deploy.
 ARG CHAIN_IMAGE
 
 # ---- tools ----------------------------------------------------------------
@@ -45,6 +49,9 @@ RUN for i in 1 2 3; do CGO_ENABLED=1 GOBIN=/out go install github.com/cosmos/rel
 
 # ---- runtime ----------------------------------------------------------------
 FROM ${CHAIN_IMAGE}
+ARG CHAIN_IMAGE
+ARG GENESIS_SHA256
+LABEL network.erth.base="${CHAIN_IMAGE}" network.erth.genesis-sha256="${GENESIS_SHA256}"
 
 # Root at start: node/drop-root.sh hands /data to `earth` (a fresh provider
 # volume is root-owned) and re-executes as `earth`, so earthd and the relayer
@@ -53,7 +60,11 @@ FROM ${CHAIN_IMAGE}
 USER root
 RUN command -v setpriv >/dev/null && id earth >/dev/null \
     && command -v earthd >/dev/null \
-    && [ -f /etc/earth/genesis.json ] && [ -f /etc/earth/genesis.json.sha256 ]
+    && [ -f /etc/earth/genesis.json ] && [ -f /etc/earth/genesis.json.sha256 ] \
+    && echo "${CHAIN_IMAGE}" | grep -Eq '^ghcr\.io/zenopie/earth-network-chain@sha256:[0-9a-f]{64}$' \
+    && echo "${GENESIS_SHA256}" | grep -Eq '^[0-9a-f]{64}$' \
+    && [ "$(sha256sum /etc/earth/genesis.json | cut -d' ' -f1)" = "${GENESIS_SHA256}" ] \
+    && [ "$(cut -d' ' -f1 /etc/earth/genesis.json.sha256)" = "${GENESIS_SHA256}" ]
 
 COPY --from=tools /out/cosmovisor /usr/local/bin/cosmovisor
 COPY --from=tools /out/rly /usr/local/bin/rly

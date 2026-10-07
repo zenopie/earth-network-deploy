@@ -50,6 +50,11 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 DIGEST="$("$HERE/bin/digest.sh" "$TAG")"
 python3 "$HERE/bin/build-sdl.py" "$HERE" "$WORK/sdl.yaml" "$DIGEST" \
   --sdl "$SDL_FILE" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
+# What the node image behind the SDL's digest was really built from: its
+# registry labels must name node/base.pin and akash/genesis.sha256 (the
+# `# FROM` comment build-sdl.py checked is only a comment).
+NODE_IMAGE="$(python3 -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["services"]["node"]["image"])' "$WORK/sdl.yaml")"
+python3 "$HERE/bin/check-node-image.py" "$NODE_IMAGE" "$DIGEST" "$(awk 'NR==1{print $1}' "$HERE/akash/genesis.sha256")"
 
 if [ "$MODE" = "--print" ]; then
   # Secrets are in it, so this goes to stdout for a human, never to a file.

@@ -17,6 +17,11 @@
 # it without credentials); the script checks that by resolving the pushed tag
 # anonymously, and refuses a digest that does not match what it pushed.
 #
+# The build passes akash/genesis.sha256 too: node/Dockerfile refuses a base
+# whose baked genesis differs, and labels the image with the base and the
+# genesis (bin/check-node-image.py, run here after the push and by deploy.sh
+# and create.sh, reads them back from the registry).
+#
 # Built from committed files only: node/ must be clean, and the tag is the
 # commit, so a digest always names a commit of this repo and, through
 # node/base.pin, one chain image. The pinned SDL line carries the base as a
@@ -54,8 +59,13 @@ base=$(tr -d '[:space:]' < "$PIN")
 [ "${base##*:}" != "$(printf '0%.0s' {1..64})" ] \
   || { echo "$PIN is the placeholder: bin/build-node.sh --base <chain tag> first" >&2; exit 1; }
 
-if [ -n "$(git status --porcelain -- node)" ]; then
-  echo "node/ has uncommitted changes: commit them first, so the digest names a commit" >&2
+# The base's baked genesis must be the pinned one: node/Dockerfile fails the
+# build otherwise, and labels the image with it.
+gsha=$(awk 'NR==1{print $1}' akash/genesis.sha256)
+[[ "$gsha" =~ ^[0-9a-f]{64}$ ]] || { echo "akash/genesis.sha256 has no sha256" >&2; exit 1; }
+
+if [ -n "$(git status --porcelain -- node akash/genesis.sha256)" ]; then
+  echo "node/ or akash/genesis.sha256 has uncommitted changes: commit them first, so the digest names a commit" >&2
   exit 1
 fi
 node/entrypoint_test.sh >/dev/null || { echo "node/entrypoint_test.sh fails: not building" >&2; exit 1; }
@@ -64,7 +74,7 @@ ref="ghcr.io/${REPO}:${rev}"
 
 if [ "$check" = 1 ]; then
   docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
-    --build-arg "CHAIN_IMAGE=$base" --output type=cacheonly node
+    --build-arg "CHAIN_IMAGE=$base" --build-arg "GENESIS_SHA256=$gsha" --output type=cacheonly node
   echo "built ${rev} on ${base}; nothing pushed"
   exit 0
 fi
@@ -73,7 +83,8 @@ meta=$(mktemp); trap 'rm -f "$meta"' EXIT
 # --provenance/--sbom off: one image manifest, so the digest is that manifest's
 # and the same one the registry returns for the tag.
 docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
-  --build-arg "CHAIN_IMAGE=$base" --metadata-file "$meta" --tag "$ref" --push node
+  --build-arg "CHAIN_IMAGE=$base" --build-arg "GENESIS_SHA256=$gsha" \
+  --metadata-file "$meta" --tag "$ref" --push node
 digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$meta")
 [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "no digest in buildx metadata" >&2; exit 1; }
 
@@ -83,6 +94,9 @@ remote=$(IMAGE_REPO="$REPO" bin/digest.sh "$rev") || {
   echo "registry has ${remote} for ${rev}, buildx pushed ${digest}" >&2; exit 1; }
 
 pinned="ghcr.io/${REPO}@${digest}"
+# Read the labels back from the registry, as a deploy will.
+NODE_IMAGE_REPO="$REPO" python3 bin/check-node-image.py "$pinned" "$base" "$gsha" \
+  || { echo "the pushed image's labels do not match what was built" >&2; exit 1; }
 echo "$pinned  (FROM $base)"
 
 if [ "$pin" = 1 ]; then
