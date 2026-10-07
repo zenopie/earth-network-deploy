@@ -35,7 +35,7 @@
 # CAUTION, learned on 2026-09-01: --fullnode only keeps keys out of the SDL. It
 # does NOT remove a priv_validator_key.json already on a volume. A former
 # validator's volume will sign from that file the moment earthd starts. See
-# docker/entrypoint.sh in the chain repo, which now refuses to start on that.
+# node/entrypoint.sh, which now refuses to start on that.
 #
 # The ads-for-gas service is its own repo, its own image and its own lease
 # (earth-network-backend). That separation is deliberate: closing a lease
@@ -52,12 +52,20 @@ version: "2.0"
 services:
   # --- the chain -----------------------------------------------------------
   node:
-    # Placeholder. bin/deploy.sh and bin/create.sh resolve the release tag to
-    # its digest (bin/digest.sh) and pin the submitted copy; nothing commits a
-    # digest here. A tag is mutable and a digest is not, and on a chain the
-    # difference between "the image I tested" and "an image with that name" is
-    # a consensus failure.
-    image: ghcr.io/zenopie/earth-network-chain@sha256:03c274793328ee4b1a4e38eab302a8b4040a7e27ce0fd35eaa21829331dd4377
+    # This repository's node image (node/Dockerfile): the chain release's
+    # generic image, by digest (node/base.pin), plus our entrypoint (keys from
+    # the env, the keyless guard, refusing a foreign genesis), cosmovisor and
+    # the relayer. bin/build-node.sh --pin builds and pushes it and writes this
+    # line and the relayer's, with the base it was built FROM as the comment
+    # (RELAUNCH.md 1.5). PLACEHOLDER (all zeros) until then.
+    #
+    # bin/deploy.sh and bin/create.sh take the chain release tag, resolve its
+    # image digest (bin/digest.sh) and build-sdl.py refuses unless that is
+    # node/base.pin and this line's FROM: the node image deployed is the one
+    # built on that release. A tag is mutable and a digest is not, and on a
+    # chain the difference between "the image I tested" and "an image with
+    # that name" is a consensus failure.
+    image: ghcr.io/zenopie/earth-network-node@sha256:0000000000000000000000000000000000000000000000000000000000000000  # FROM ghcr.io/zenopie/earth-network-chain@sha256:0000000000000000000000000000000000000000000000000000000000000000
 
     env:
       # The relaunch genesis's chain id (chain repo networks/genesis/chain.json).
@@ -215,7 +223,7 @@ services:
       # and cannot cancel it, and the fee collector is the recipient of every
       # tx (round-5 R5-E-1). The edge filter serves only `tx.height=N`
       # searches; this is the node's own half. Only the IBC packet keys an
-      # rly relayer searches by (docker/relayer.sh talks to node:26657
+      # rly relayer searches by (node/relayer.sh talks to node:26657
       # directly) are indexed. tx.hash and tx.height are always indexed, so
       # lookups by hash and per-block searches still answer.
       # bin/build-sdl.py refuses an SDL without it, or with an address key.
@@ -454,19 +462,19 @@ services:
   # The backend has its own tunnel in its own repo; one tunnel per deployment,
   # because a tunnel's replicas are chosen by proximity with no traffic
   # steering, so connectors reaching different origins would black-hole traffic.
-  # IBC relayer. OFF by default — see docker/relayer.sh.
+  # IBC relayer. OFF by default — see node/relayer.sh.
   #
   # Same image as the node, deliberately: one image is one digest to pin
   # and one artefact to reason about. The relayer binary is just a second entry
-  # point in it.
+  # point in it (node/Dockerfile).
   #
   # Co-locating this with the validator is safe in a way nothing else in this
   # repo is. A relayer cannot forge packets or move funds — it only submits
   # proofs both chains verify themselves — so its key pays gas and holds nothing
   # else. The failure mode is delay, not theft.
   relayer:
-    # Placeholder, pinned with the node's image at deploy time: same image.
-    image: ghcr.io/zenopie/earth-network-chain@sha256:03c274793328ee4b1a4e38eab302a8b4040a7e27ce0fd35eaa21829331dd4377
+    # The node's image, pinned with it by bin/build-node.sh --pin.
+    image: ghcr.io/zenopie/earth-network-node@sha256:0000000000000000000000000000000000000000000000000000000000000000  # FROM ghcr.io/zenopie/earth-network-chain@sha256:0000000000000000000000000000000000000000000000000000000000000000
     command:
       - /usr/local/bin/relayer.sh
     env:

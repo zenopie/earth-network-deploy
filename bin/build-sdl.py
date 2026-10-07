@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Build the SDL that actually gets submitted: akash/deploy.yaml + the image
-digest for a released tag + secrets from .env.
+"""Build the SDL that actually gets submitted: akash/deploy.yaml, checked
+against the chain release being deployed, + secrets from .env.
 
 Textual insertion, not a YAML round-trip, so the committed file's comments and
 exact shape survive into what the provider receives. A round-trip would also
@@ -15,7 +15,7 @@ import os, re, sys, yaml
 ap = argparse.ArgumentParser()
 ap.add_argument("repo")                       # this repo
 ap.add_argument("out")                        # where to write the submitted copy
-ap.add_argument("digest", nargs="?")          # ghcr.io/...@sha256:...
+ap.add_argument("digest", nargs="?")          # the chain release's image, ghcr.io/zenopie/earth-network-chain@sha256:...
 ap.add_argument("--sdl", default="akash/deploy.yaml",
                 help="which SDL to build, relative to the repo")
 ap.add_argument("--validator-key", action="store_true",
@@ -65,19 +65,26 @@ assert not want_nodekey or (fullnode and want_valkey), \
 # networks/genesis/chain.json). Kept as earth-1; the new consensus key, not a new
 # id, is what keeps the old chain's signatures from counting against this one.
 EXPECTED_CHAIN_ID = "earth-1"
-# The consensus pubkey the launch genesis's one gentx names (RELAUNCH.md, "Where
-# things stand"; chain repo scripts/ceremony.sh --pubkey). --validator-key
-# refuses any other key. Change it only together with a new gentx.
-EXPECTED_CONSENSUS_PUBKEY = "PGqvPN4CxEkxvvh3tSBX0SGeBgjMdqQwZkdHt8FRLm4="
-# Keys that signed an earlier earth-1. Their signatures at the same heights
-# under the same chain id are double-sign evidence: never again (chain repo
-# scripts/ceremony.sh USED_CONSENSUS_KEYS).
-USED_CONSENSUS_PUBKEYS = {"kTMzoCBEj1g2z49K1D/jxuLGrhTsnzfTx6Gf1LnBUJw="}
+# launch/launch.json, the launch identities the chain repo's ceremony took
+# (--launch): the consensus pubkey the launch genesis's one gentx names, which
+# --validator-key requires (change it only together with a new gentx), and the
+# keys that signed an earlier earth-1, whose signatures at the same heights
+# under the same chain id are double-sign evidence: never again.
+LAUNCH = json.load(open(os.path.join(repo, "launch/launch.json")))
+EXPECTED_CONSENSUS_PUBKEY = LAUNCH["consensus_pubkey"]
+USED_CONSENSUS_PUBKEYS = set(LAUNCH["used_consensus_keys"])
 no_statesync = args.no_statesync
 # earth-edge's image (edge/, bin/build-edge.sh). The SDL pins it by digest
 # in the file; the all-zero digest is the placeholder before the first build.
 EDGE_IMAGE_REPO = "ghcr.io/zenopie/earth-network-edge"
 EDGE_PLACEHOLDER = "sha256:" + "0" * 64
+# The node and relayer run this repository's node image (node/Dockerfile,
+# bin/build-node.sh), built FROM the chain's generic image named in
+# node/base.pin. Never the chain image itself: it has none of our entrypoint
+# (no injected keys, no keyless guard, no cosmovisor, no relayer).
+NODE_IMAGE_REPO = "ghcr.io/zenopie/earth-network-node"
+CHAIN_IMAGE_REPO = "ghcr.io/zenopie/earth-network-chain"
+PLACEHOLDER = "sha256:" + "0" * 64
 # Without --fullnode this script used to inject VALIDATOR_MNEMONIC after a
 # VALIDATOR_BONDED line for a DEV_INIT devnet. akash/deploy.yaml has no such line
 # on purpose, so the mnemonic never reaches a lease: refuse up front.
@@ -113,17 +120,31 @@ for line in open(os.path.join(repo, ".env")):
 
 s = open(os.path.join(repo, args.sdl)).read()
 
-# Pin the image at deploy time rather than at build time. The chain repo used to
-# rewrite this and commit it back; it no longer knows this file exists.
-# Only the lines naming the digest's own repository (the node and the relayer):
-# the edge runs a different image, pinned in the file by bin/build-edge.sh.
+# The node image is committed in the file (bin/build-node.sh --pin), each line
+# with the chain image it was built FROM as a comment. The digest given here is
+# the chain release being deployed (bin/deploy.sh and bin/create.sh resolve the
+# tag): it must be node/base.pin and the FROM of both lines, so what is
+# deployed is the node image built on that release, not one built on another.
+base_pin = open(os.path.join(repo, "node/base.pin")).read().strip()
+assert re.fullmatch(re.escape(CHAIN_IMAGE_REPO) + r"@sha256:[0-9a-f]{64}", base_pin), (
+    "node/base.pin is not %s@sha256:<64 hex>: %r" % (CHAIN_IMAGE_REPO, base_pin))
+node_lines = re.findall(r'(?m)^\s*image:\s*(\S+)[ \t]*(?:#\s*FROM\s+(\S+))?[ \t]*$', s)
+node_lines = [(i, f) for i, f in node_lines if i.startswith(NODE_IMAGE_REPO + "@")]
+assert len(node_lines) == 2, "expected the node and relayer %s image lines, found %d" % (NODE_IMAGE_REPO, len(node_lines))
+for i, f in node_lines:
+    assert f == base_pin, (
+        "node image %s… was built FROM %r, node/base.pin is %s…: rebuild it (bin/build-node.sh --pin)"
+        % (i[:60], f, base_pin[:60]))
 if digest:
     dm = re.fullmatch(r"(ghcr\.io/[a-z0-9._/-]+)@sha256:[0-9a-f]{64}", digest)
     assert dm, "digest %r is not ghcr.io/<repo>@sha256:<64 hex>" % digest
-    assert dm.group(1) != EDGE_IMAGE_REPO, "the node digest names the edge's repository"
-    s, n = re.subn(r'(?m)^(\s*image:\s*)' + re.escape(dm.group(1)) + r'[@:]\S+', r'\g<1>' + digest, s)
-    assert n, "no %s image line to pin" % dm.group(1)
-    print("pinned %d image line(s) to %s" % (n, digest.split("@")[-1][:19] + "…"))
+    assert dm.group(1) == CHAIN_IMAGE_REPO, (
+        "the release digest must name %s (the chain release), not %s" % (CHAIN_IMAGE_REPO, dm.group(1)))
+    assert digest == base_pin, (
+        "chain release %s… is not node/base.pin %s…: the committed node image is built on "
+        "another release. bin/build-node.sh --base <tag>, commit, --pin, commit (RELAUNCH.md 1.5)"
+        % (digest[:60], base_pin[:60]))
+    print("release:      %s… is node/base.pin and the node image's FROM" % digest.split("@")[-1][:19])
 
 # A --fullnode SDL without --validator-key describes a node that must not be
 # able to sign. Saying so in the SDL is not enough: the entrypoint only ever
@@ -421,6 +442,23 @@ assert "rpc-server:error" in ll, "EARTHD_LOG_LEVEL must hold rpc-server at error
 img = svcs["node"]["image"]
 if "relayer" in svcs:
     assert img == svcs["relayer"]["image"], "node and relayer images differ"
+nm = re.fullmatch(re.escape(NODE_IMAGE_REPO) + r"@(sha256:[0-9a-f]{64})", img)
+assert nm, "node image must be %s@sha256:<64 hex> (this repository's node image, by digest), has %r" % (
+    NODE_IMAGE_REPO, img)
+# The placeholder, here and in node/base.pin, is refused in any build for a
+# release (what deploy.sh and create.sh send); a dry read without a digest
+# (RELAUNCH.md 2.1) only warns.
+if nm.group(1) == PLACEHOLDER or base_pin.endswith(PLACEHOLDER):
+    assert not digest, (
+        "node image or node/base.pin is the placeholder: bin/build-node.sh --base <tag>, then --pin, "
+        "and commit (RELAUNCH.md 1.5)")
+    print("WARNING: node image is the placeholder; a build for a release refuses it (RELAUNCH.md 1.5)")
+# What runs is the image's ENTRYPOINT (node/entrypoint.sh); the relayer's
+# command is its second entry point, and nothing else.
+assert not svcs["node"].get("command") and not svcs["node"].get("args"), "node must not override the image's command"
+if "relayer" in svcs:
+    assert svcs["relayer"].get("command") == ["/usr/local/bin/relayer.sh"] and not svcs["relayer"].get("args"), (
+        "relayer command must be /usr/local/bin/relayer.sh, has %r" % svcs["relayer"].get("command"))
 
 # The public RPC and LCD reach the node only through earth-edge, the request
 # filter (akash/README.md, "Public RPC and LCD"; R4-E-1..3). Its allowlist
@@ -471,7 +509,7 @@ emem = d["profiles"]["compute"]["edge"]["resources"]["memory"]["size"]
 assert emem == "192Mi" and e["GOMEMLIMIT"] == "160MiB", (
     "edge memory %r / GOMEMLIMIT %r: the body budget (64 MiB) is sized against 192Mi/160MiB" % (emem, e["GOMEMLIMIT"]))
 print("services:   ", ", ".join(sorted(svcs)))
-print("node image: ", img)
+print("node image: ", img, " FROM", base_pin)
 print("edge image: ", ed["image"])
 print("edge:        rpc/lcd -> %s, %s  GOMAXPROCS=%s GOMEMLIMIT=%s backend reserve=%s" % (
       e["EDGE_RPC_UPSTREAM"], e["EDGE_LCD_UPSTREAM"], e["GOMAXPROCS"], e["GOMEMLIMIT"],
