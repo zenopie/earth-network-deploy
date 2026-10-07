@@ -91,8 +91,10 @@ reads `block_results` from it from height 1. There is no separate archive lease.
      changed. A new digest goes out with `bin/deploy.sh` like any SDL change (an image
      change on `edge` only; the node's volume is untouched).
    - `edge/conformance` also checks the answer ceilings (`edge/filter/forward.go`)
-     against the pinned chain's block `max_bytes` (4 MiB) and its 1 MiB per-tx
-     result cap: a chain release that changes either fails here.
+     against the pinned chain's genesis (block `max_bytes`, `max_gas`, evidence) and
+     its result caps, read from the chain's `app/resultcap` source: a chain release
+     that changes, renames or removes one fails here until
+     `edge/filter/chaincaps.go` and the ceilings are re-derived.
 5. **The node image built on the launch tag and pinned.** The chain's image is
    generic; `node/` is ours (`node/Dockerfile` `FROM` the chain image by digest,
    `node/entrypoint.sh`, `node/relayer.sh`, `node/drop-root.sh`, cosmovisor and rly

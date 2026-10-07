@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Materialise the chain at the commit chain.pin names into .chain/ (go.mod,
-# proto/ and networks/genesis.json only, from `git archive`, so a working tree's uncommitted edits never
-# stand in for the pinned commit), and download the SDK version that go.mod
+# proto/, networks/genesis.json and app/resultcap/ only, from `git archive`, so
+# a working tree's uncommitted edits never stand in for the pinned commit), and download the SDK version that go.mod
 # requires into the module cache, where the tests read the SDK's protos.
 #
 # Why not a go.mod require on the chain module: the chain replaces modules with
@@ -34,7 +34,7 @@ else
     git -C "$src" fetch -q --depth 1 "$repo" "$commit"
   fi
   mkdir "$tmp/out"
-  git -C "$src" archive "$commit" go.mod proto networks/genesis.json | tar -x -C "$tmp/out"
+  git -C "$src" archive "$commit" go.mod proto networks/genesis.json app/resultcap | tar -x -C "$tmp/out"
   echo "$commit" > "$tmp/out/COMMIT"
   rm -rf .chain
   mv "$tmp/out" .chain

@@ -10,7 +10,8 @@ import (
 )
 
 // The chain these tests read is the commit chain.pin names, materialised by
-// fetch-chain.sh into .chain/ (go.mod and proto/, from git archive).
+// fetch-chain.sh into .chain/ (go.mod, proto/, networks/genesis.json and
+// app/resultcap/, from git archive).
 
 const chainDir = ".chain"
 

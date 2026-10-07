@@ -1,8 +1,9 @@
 # The chain the conformance tests check the filter against: its protos (every
 # grpc-gateway binding and request message), its go.mod (the SDK version,
 # whose protos come from the module cache, and the CometBFT and grpc-gateway
-# versions this module must require) and its genesis (the block size the
-# answer ceilings are sized against). fetch-chain.sh materialises exactly this
+# versions this module must require), its genesis (the block size and gas the
+# answer ceilings are sized against) and app/resultcap (the result caps they
+# are sized against). fetch-chain.sh materialises exactly this
 # commit into .chain/; the tests refuse any other.
 #
 # Bump it with every chain release this deployment runs, then run
@@ -10,4 +11,4 @@
 # filter's allowlist and what the node now serves: fix the filter in the same
 # change as the bump.
 repo=https://github.com/zenopie/earth-network-chain.git
-commit=0a292aea9c57feee64601c4c4c167a4bbc4d6563
+commit=991a6472f5e20304cd9a67e00c4ee1c9ab3a4a29
