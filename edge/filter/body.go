@@ -17,12 +17,18 @@ import (
 //   - The read has a deadline set from the body's size at a minimum rate
 //     (readGrace + size/minRate), so a dribble is cut off in seconds, not
 //     at the server's 20 s read timeout.
-//   - Memory is reserved from one process-wide byte budget as the bytes
-//     arrive (a client that declares 1 MiB and sends nothing holds nothing),
-//     and stays reserved until the request is answered, copies included:
-//     each body is charged factor x its size, where factor counts the copies
-//     its handler makes while parsing and re-encoding it. When the budget is
-//     spent, a request is refused 503 rather than queued.
+//   - Memory is reserved from one process-wide byte budget, chunk by chunk,
+//     each chunk before it is allocated, and stays reserved until the request
+//     is answered, copies included: each body is charged factor x its size,
+//     where factor counts the copies its handler makes while parsing and
+//     re-encoding it. When the budget is spent, a request is refused 503
+//     rather than queued.
+//   - A chunk is reserved before its bytes arrive, so chunks grow with what
+//     has arrived (round-6 R6-E-2): the first is at most firstChunk, and each
+//     next one at most the bytes already read (up to readChunk). A client
+//     that declares 1 MiB and sends nothing holds firstChunk x factor
+//     (24 KiB for JSON-RPC) until its read deadline; one that stalls after n
+//     bytes holds at most about 2n x factor.
 //   - Bytes past the first smallBody of a request may use only 3/4 of the
 //     budget, so a flood of large bodies cannot starve the small ones (every
 //     JSON-RPC call, and a typical private tx broadcast, is under it).
@@ -41,6 +47,7 @@ const (
 	minRate       = 128 << 10 // bytes per second
 	readGrace     = 2 * time.Second
 	readChunk     = 32 << 10
+	firstChunk    = 4 << 10
 
 	// Copies each body has live at its peak, counted generously: the read
 	// buffer and its growth slack, plus for JSON-RPC the params, the decoded
@@ -123,7 +130,7 @@ func readBody(w http.ResponseWriter, r *http.Request, factor int64, backend bool
 	// The body arrives into chunks, each reserved before it is allocated,
 	// and is joined once at the end: no growth copies left as garbage.
 	var chunks [][]byte
-	first := int64(readChunk)
+	first := int64(firstChunk)
 	if expect < first {
 		first = expect + 1 // room to see EOF without a second chunk
 	}
@@ -132,9 +139,11 @@ func readBody(w http.ResponseWriter, r *http.Request, factor int64, backend bool
 		if n := len(chunks); n > 0 && len(chunks[n-1]) < cap(chunks[n-1]) {
 			cur = chunks[n-1]
 		} else {
-			size := int64(readChunk)
-			if n == 0 {
-				size = first
+			// Grow with what has arrived: never reserve much more than
+			// the client has already sent.
+			size := first
+			if n > 0 {
+				size = min(max(total, firstChunk), readChunk)
 			}
 			var big int64
 			if total+size > smallBody {
