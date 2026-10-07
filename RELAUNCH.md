@@ -222,8 +222,8 @@ akash/README.md, "The backend's credential".)
    - `chain_id` `earth-1`, `genesis_time` as chosen, one gentx: operator
      `earthvaloper1…` of `earth1n6amv…`, pubkey `PGqvPN4C…`;
    - no balance but the validator's and the module accounts';
-   - genesis account numbers start at the large offset (old earth-1 txs cannot
-     replay);
+   - genesis account numbers are not offset (audit X-1 accepted: the earlier
+     chains' only user was the operator, and the operator is a new key);
    - every verifying key (register, action, membership, stake, vote) matches the
      store builds.
 4. Commit the sources and the rebuilt genesis. **Tag the launch release** from that
