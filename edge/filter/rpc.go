@@ -118,10 +118,18 @@ func (h *rpcHandler) serveURI(w http.ResponseWriter, r *http.Request) {
 }
 
 // rpcFwdOpts: genesis_chunked is immutable for the chain's life (a relaunch
-// purges Cloudflare's cache, RELAUNCH.md), ~1.75 MB a call: cacheable.
+// purges Cloudflare's cache, RELAUNCH.md), ~1.75 MB a call: cacheable. The
+// calls whose answers are sized by chain data get a byte ceiling.
 func rpcFwdOpts(method string) fwdOpts {
-	if method == "genesis_chunked" {
+	switch method {
+	case "genesis_chunked":
 		return fwdOpts{cache: "public, max-age=3600, s-maxage=86400"}
+	case "block_results":
+		return fwdOpts{maxResp: maxRespBlockResults}
+	case "tx":
+		return fwdOpts{maxResp: maxRespTx}
+	case "block":
+		return fwdOpts{maxResp: maxRespBlock}
 	}
 	return fwdOpts{}
 }

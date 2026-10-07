@@ -94,38 +94,72 @@ const holdCeiling = 3 * time.Minute
 // under the node's own connection caps (EARTHD_RPC_MAX_OPEN_CONNECTIONS 100,
 // EARTHD_API_MAX_OPEN_CONNECTIONS 200), so the node never refuses a
 // connection the proxy made and the proxy's 503 is the only overload answer.
+// They also sum to under the transport's MaxConnsPerHost (64), so a slot
+// holder never waits for a connection (a test holds them to it).
 //
-// The abci class is the node's real bottleneck. CometBFT runs the app behind
+// The ABCI mutex is the node's real bottleneck. CometBFT runs the app behind
 // one mutex (the SDK starts it with a local client creator; every ABCI
 // connection shares it), and consensus (PrepareProposal, ProcessProposal,
 // FinalizeBlock, Commit) queues on it behind whatever holds it. Everything
-// the public endpoints send through that mutex is in this one class: RPC
-// abci_query (every path), broadcast_tx_sync/async and the LCD broadcast
-// (CheckTx), and abci_info. With at most 2 public + 1 backend holders, each
-// bounded (a query by query-gas-limit, a CheckTx by its proofs and the block
-// gas limit), a block step waits behind at most three of them.
+// the public endpoints send through that mutex is in one of two classes
+// whose slots together are abciMutexHolders: abciQuery (RPC abci_query on
+// every path, abci_info) and broadcast (broadcast_tx_sync/async and the LCD
+// broadcast, i.e. CheckTx). Each holder is bounded (a query by
+// query-gas-limit, a CheckTx by its proofs and the block gas limit), so a
+// block step waits behind at most abciMutexHolders of them. They are split
+// by purpose so a flood of anonymous reads cannot starve tx submission
+// (round-6 R6-E-3), and each keeps a backend slot (gas-check's store reads,
+// the backend's own broadcasts).
+//
+// The bulk class holds the calls whose answer size is set by what was put
+// on chain rather than by the request: block_results, a tx by hash (RPC tx,
+// LCD txs/{hash}). A wasm tx can make its stored result tens of MB (wasmd
+// charges ~1 gas per byte of event and data), and the node builds each such
+// answer in memory several times over (round-6 R6-E-1 measured ~6x), so
+// these are few at a time, and each answer also has a byte ceiling
+// (forward.go, fwdOpts.maxResp). Neither stops the node's build of one
+// answer: the real fix is the chain's per-tx result byte cap, which bounds
+// what any of these calls can be asked to build. The edge bounds only how
+// many are built at once and how much of each it passes on.
 type Classes struct {
-	light    *class // point reads that do not touch the app: status, a block, a commit, a tx by hash
-	results  *class // block_results, block ranges, genesis_chunked: larger bodies
-	query    *class // LCD gRPC GETs: run outside the ABCI mutex, metered by query gas
-	abci     *class // everything that takes CometBFT's ABCI mutex (see above)
-	simulate *class // LCD simulate: CPU (proofs, contract code), outside the mutex
-	search   *class // the LCD tx search, tx.height=N only: one block's txs
+	light     *class // point reads that do not touch the app: status, a block, a commit
+	results   *class // block ranges (headers), genesis_chunked: larger bodies of fixed size
+	bulk      *class // block_results, a tx by hash: answers sized by chain data (above)
+	query     *class // LCD gRPC GETs: run outside the ABCI mutex, metered by query gas
+	abciQuery *class // RPC abci_query, abci_info: under the ABCI mutex
+	broadcast *class // RPC broadcast_tx_sync/async, LCD POST txs (CheckTx): under the ABCI mutex
+	simulate  *class // LCD simulate: CPU (proofs, contract code), outside the mutex
+	search    *class // the LCD tx search, tx.height=N only: one block's txs
 
 	backendAuth []byte // SHA-256 of the backend's exact Authorization value; nil: no backend
 }
 
+// abciMutexHolders: the most requests the edge has inside (or queued on)
+// the node's ABCI mutex at once, public and backend slots of abciQuery and
+// broadcast together. A test holds DefaultClasses to it.
+const abciMutexHolders = 4
+
 func DefaultClasses() *Classes {
 	w := 2 * time.Second
 	return &Classes{
-		light:    newClass("light", 24, 4, w, 15*time.Second),
-		results:  newClass("results", 8, 4, w, 30*time.Second),
-		query:    newClass("query", 12, 4, w, 20*time.Second),
-		abci:     newClass("abci", 2, 1, 4*time.Second, 20*time.Second),
-		simulate: newClass("simulate", 2, 1, 4*time.Second, 30*time.Second),
-		search:   newClass("search", 1, 0, w, 10*time.Second),
+		light:     newClass("light", 20, 3, w, 15*time.Second),
+		results:   newClass("results", 8, 4, w, 30*time.Second),
+		bulk:      newClass("bulk", 3, 1, w, 30*time.Second),
+		query:     newClass("query", 12, 4, w, 20*time.Second),
+		abciQuery: newClass("abci-query", 1, 1, 4*time.Second, 20*time.Second),
+		broadcast: newClass("broadcast", 1, 1, 4*time.Second, 20*time.Second),
+		simulate:  newClass("simulate", 2, 1, 4*time.Second, 30*time.Second),
+		search:    newClass("search", 1, 0, w, 10*time.Second),
 	}
 }
+
+// all lists every class (tests, and the ABCI holder count).
+func (c *Classes) all() []*class {
+	return []*class{c.light, c.results, c.bulk, c.query, c.abciQuery, c.broadcast, c.simulate, c.search}
+}
+
+// isABCI: the class's requests take the node's ABCI mutex.
+func (c *Classes) isABCI(cl *class) bool { return cl == c.abciQuery || cl == c.broadcast }
 
 // SetBackendAuthSHA256 names the backend: a request whose Authorization
 // header hashes to h may use the reserved slots. The header itself is still

@@ -56,7 +56,7 @@ func (g *gate) release() { g.releaseOnce.Do(func() { close(g.open) }) }
 
 func fastClasses() *Classes {
 	c := DefaultClasses()
-	for _, cl := range []*class{c.light, c.results, c.query, c.abci, c.simulate, c.search} {
+	for _, cl := range c.all() {
 		cl.wait = 20 * time.Millisecond
 		cl.timeout = 100 * time.Millisecond
 	}
@@ -79,18 +79,18 @@ func TestSlotHeldUntilNodeAnswers(t *testing.T) {
 		w := do(rpc, get(abciSupply))
 		codes[w.Code]++
 	}
-	// The first two (the public abci cap) time out at the client with 504;
-	// the node is still working on them, so every later one is refused.
-	if codes[http.StatusGatewayTimeout] != 2 || codes[http.StatusServiceUnavailable] != 8 {
-		t.Fatalf("codes %v, want 2x504 and 8x503", codes)
+	// The first (the public abci-query cap) times out at the client with
+	// 504; the node is still working on it, so every later one is refused.
+	if codes[http.StatusGatewayTimeout] != 1 || codes[http.StatusServiceUnavailable] != 9 {
+		t.Fatalf("codes %v, want 1x504 and 9x503", codes)
 	}
-	if n := g.maxInFlight.Load(); n != 2 {
-		t.Fatalf("node worked on %d abci requests at once, cap is 2", n)
+	if n := g.maxInFlight.Load(); n != 1 {
+		t.Fatalf("node worked on %d abci requests at once, cap is 1", n)
 	}
 	g.release()
 	// Once the node answers, the slots are free again.
 	deadline := time.Now().Add(2 * time.Second)
-	for len(c.abci.sem) != 0 && time.Now().Before(deadline) {
+	for len(c.abciQuery.sem) != 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if w := do(rpc, get(abciSupply)); w.Code != http.StatusOK {
@@ -98,40 +98,64 @@ func TestSlotHeldUntilNodeAnswers(t *testing.T) {
 	}
 }
 
-// R5-E-3: every door into the ABCI mutex shares one class: RPC abci_query,
-// RPC and LCD broadcasts, abci_info.
-func TestABCIClassShared(t *testing.T) {
+// R6-E-3: every door into the ABCI mutex is in one of two classes, split by
+// purpose: a flood of reads (abci_query on any path, abci_info) fills only
+// its own class, and broadcasts (RPC and LCD) still get through. Together
+// they never hold more than abciMutexHolders.
+func TestABCIClassesSplit(t *testing.T) {
+	c := DefaultClasses()
+	if n := cap(c.abciQuery.sem) + cap(c.abciQuery.reserved) + cap(c.broadcast.sem) + cap(c.broadcast.reserved); n != abciMutexHolders {
+		t.Fatalf("ABCI classes hold %d, want %d", n, abciMutexHolders)
+	}
+	if cap(c.broadcast.reserved) == 0 || cap(c.abciQuery.reserved) == 0 {
+		t.Fatalf("no backend reserve in an ABCI class")
+	}
+
 	g := newGate(t)
-	c := fastClasses()
-	c.abci.timeout = 5 * time.Second
+	c = fastClasses()
+	c.abciQuery.timeout = 5 * time.Second
+	c.broadcast.timeout = 5 * time.Second
 	rpc := NewRPC(g.srv.URL, client(), c)
 	lcd := NewLCD(g.srv.URL, client(), c)
 	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); do(rpc, get(abciSupply)) }()
-	}
-	for g.inFlight.Load() < 2 {
+	wg.Add(1)
+	go func() { defer wg.Done(); do(rpc, get(abciSupply)) }()
+	for g.inFlight.Load() < 1 {
 		time.Sleep(time.Millisecond)
 	}
-	others := map[string]struct {
+	reads := map[string]struct {
 		h http.Handler
 		q req
 	}{
 		"rpc store read":    {rpc, post(`{"jsonrpc":"2.0","id":2,"method":"abci_query","params":{"data":"0A0B","path":"/store/pki/key"}}`)},
-		"rpc broadcast":     {rpc, post(`{"jsonrpc":"2.0","id":7,"method":"broadcast_tx_sync","params":{"tx":"CgQKAggB"}}`)},
 		"rpc abci_info":     {rpc, get("/abci_info")},
-		"lcd broadcast":     {lcd, req{method: "POST", target: "/cosmos/tx/v1beta1/txs", body: `{"tx_bytes":"CgQKAggB","mode":"BROADCAST_MODE_SYNC"}`, header: map[string]string{"Content-Type": jsonCT}}},
 		"rpc abci gRPC GET": {rpc, get("/abci_query?path=%22/earth.shielded.v1.Query/Tree%22")},
 	}
-	for name, o := range others {
+	for name, o := range reads {
 		if w := do(o.h, o.q); w.Code != http.StatusServiceUnavailable {
-			t.Errorf("%s while the abci class is full: %d, want 503", name, w.Code)
+			t.Errorf("%s while the abci-query class is full: %d, want 503", name, w.Code)
+		}
+	}
+	// A broadcast is not behind the reads: it reaches the node.
+	rpcBroadcast := post(`{"jsonrpc":"2.0","id":7,"method":"broadcast_tx_sync","params":{"tx":"CgQKAggB"}}`)
+	lcdBroadcast := req{method: "POST", target: "/cosmos/tx/v1beta1/txs", body: `{"tx_bytes":"CgQKAggB","mode":"BROADCAST_MODE_SYNC"}`, header: map[string]string{"Content-Type": jsonCT}}
+	wg.Add(1)
+	go func() { defer wg.Done(); do(rpc, rpcBroadcast) }()
+	for g.inFlight.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	// Now the broadcast class is full too: both broadcast doors share it.
+	for name, q := range map[string]struct {
+		h http.Handler
+		q req
+	}{"rpc broadcast": {rpc, rpcBroadcast}, "lcd broadcast": {lcd, lcdBroadcast}} {
+		if w := do(q.h, q.q); w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s while the broadcast class is full: %d, want 503", name, w.Code)
 		}
 	}
 	// LCD queries run outside the mutex: their own class.
 	if w := do(lcd, get("/cosmos/bank/v1beta1/params")); w.Code == http.StatusServiceUnavailable {
-		t.Errorf("an LCD query waited on the abci class")
+		t.Errorf("an LCD query waited on an ABCI class")
 	}
 	g.release()
 	wg.Wait()
@@ -141,17 +165,15 @@ func TestABCIClassShared(t *testing.T) {
 func TestBackendReserve(t *testing.T) {
 	g := newGate(t)
 	c := fastClasses()
-	c.abci.timeout = 5 * time.Second
+	c.abciQuery.timeout = 5 * time.Second
 	auth := "Basic ZWFydGgtYmFja2VuZDp0b2tlbg=="
 	sum := sha256.Sum256([]byte(auth))
 	c.SetBackendAuthSHA256(sum[:])
 	rpc := NewRPC(g.srv.URL, client(), c)
 	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); do(rpc, get(abciSupply)) }()
-	}
-	for g.inFlight.Load() < 2 {
+	wg.Add(1)
+	go func() { defer wg.Done(); do(rpc, get(abciSupply)) }()
+	for g.inFlight.Load() < 1 {
 		time.Sleep(time.Millisecond)
 	}
 	if w := do(rpc, req{method: "GET", target: abciSupply, header: map[string]string{"Authorization": "Basic d3Jvbmc="}}); w.Code != http.StatusServiceUnavailable {
@@ -163,7 +185,7 @@ func TestBackendReserve(t *testing.T) {
 		defer wg.Done()
 		backendCode = do(rpc, req{method: "GET", target: abciSupply, header: map[string]string{"Authorization": auth}}).Code
 	}()
-	for g.inFlight.Load() < 3 {
+	for g.inFlight.Load() < 2 {
 		time.Sleep(time.Millisecond)
 	}
 	g.release()
@@ -171,8 +193,8 @@ func TestBackendReserve(t *testing.T) {
 	if backendCode != http.StatusOK {
 		t.Fatalf("backend request with the public slots full: %d", backendCode)
 	}
-	if got := g.maxInFlight.Load(); got != 3 {
-		t.Fatalf("node saw %d at once, want 2 public + 1 reserved", got)
+	if got := g.maxInFlight.Load(); got != 2 {
+		t.Fatalf("node saw %d at once, want 1 public + 1 reserved", got)
 	}
 }
 
@@ -224,7 +246,7 @@ func TestSlowBodyShed(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	// No slot of any class is held by the 40 dribblers.
-	for _, cl := range []*class{c.light, c.results, c.query, c.abci, c.simulate, c.search} {
+	for _, cl := range c.all() {
 		if len(cl.sem) != 0 {
 			t.Fatalf("a slow body holds a %s slot", cl.name)
 		}

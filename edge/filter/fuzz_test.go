@@ -213,8 +213,8 @@ func FuzzLCD(f *testing.F) {
 			if fw.Method == "GET" {
 				assertLCDCost(t, rt, q)
 			}
-			if fw.Method == "POST" && rt.pattern == "/cosmos/tx/v1beta1/txs" && rt.class(c) != c.abci {
-				t.Fatalf("a broadcast (CheckTx) outside the abci class")
+			if fw.Method == "POST" && rt.pattern == "/cosmos/tx/v1beta1/txs" && rt.class(c) != c.broadcast {
+				t.Fatalf("a broadcast (CheckTx) outside the broadcast class")
 			}
 			if fw.Method == "POST" {
 				if fw.Header.Get("Content-Type") != "application/json" || checkJSONObject(bodies[i], rt.body) != nil {
@@ -270,8 +270,14 @@ func assertRPCCost(t *testing.T, c *Classes, call rpcCall, cl *class, bodyLen in
 	if !boundedRPC[call.method] {
 		t.Fatalf("forwarded %s, not a bounded method", call.method)
 	}
-	if mutexMethods[call.method] != (cl == c.abci) {
-		t.Fatalf("%s in class %s: every ABCI-mutex call, and only those, is in the abci class", call.method, cl.name)
+	if mutexMethods[call.method] != c.isABCI(cl) {
+		t.Fatalf("%s in class %s: every ABCI-mutex call, and only those, is in an ABCI class", call.method, cl.name)
+	}
+	if strings.HasPrefix(call.method, "broadcast_") != (cl == c.broadcast) {
+		t.Fatalf("%s in class %s: broadcasts, and only those, are in the broadcast class", call.method, cl.name)
+	}
+	if (call.method == "block_results" || call.method == "tx") != (cl == c.bulk) {
+		t.Fatalf("%s in class %s: answers sized by chain data are in the bulk class", call.method, cl.name)
 	}
 	if bodyLen > 2*maxBody {
 		t.Fatalf("forwarded a %d-byte body", bodyLen)

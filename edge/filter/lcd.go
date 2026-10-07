@@ -64,6 +64,8 @@ type lcdRoute struct {
 	search bool
 	grpc   string // the gRPC method behind it ("" for the tx service)
 	page   bool   // its request has a PageRequest
+	// maxResp: the answer's byte ceiling for public requests (0: none).
+	maxResp int64
 }
 
 // Path parameter types, by the name used in lcdpolicy.go's patterns.
@@ -240,7 +242,7 @@ func (h *lcdHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if enc := q.Encode(); enc != "" {
 			pq += "?" + enc
 		}
-		h.up.forward(w, r, cl, http.MethodGet, pq, nil, hdr, fwdOpts{})
+		h.up.forward(w, r, cl, http.MethodGet, pq, nil, hdr, fwdOpts{maxResp: rt.maxResp})
 	case http.MethodPost:
 		rt := h.find(http.MethodPost, parts)
 		if rt == nil {

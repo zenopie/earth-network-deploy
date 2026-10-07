@@ -560,13 +560,13 @@ func TestLCDServed(t *testing.T) {
 	}
 }
 
-// abci_query serves its own short list, all in the abci class, and none of
+// abci_query serves its own short list, all in the abci-query class, and none of
 // the LCD's paginated methods, nor anything from the tx service.
 func TestABCIGRPCList(t *testing.T) {
 	c := DefaultClasses()
 	for p := range abciGRPC {
 		cl, err := checkABCIQuery(c, p, nil, false)
-		if err != nil || cl != c.abci {
+		if err != nil || cl != c.abciQuery {
 			t.Errorf("%s: %v (class %v)", p, err, cl)
 		}
 		if strings.HasPrefix(p, "/cosmos.tx.") {

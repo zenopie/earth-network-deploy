@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -52,7 +53,41 @@ type fwdOpts struct {
 	// cache, if set, is the Cache-Control sent with a 200 (genesis_chunked:
 	// immutable for the chain's life, so Cloudflare can serve it).
 	cache string
+	// maxResp, if set, is the most answer bytes passed to a public client
+	// (the backend has none: its indexer must read every height). An answer
+	// that declares more is refused 502 before anything is sent; one that
+	// streams past it is cut off mid-body (the connection is aborted, so
+	// the client sees a broken answer, never a short valid one).
+	maxResp int64
 }
+
+// Answer ceilings (round-6 R6-E-1), for the calls whose answer size is set
+// by chain data. A backstop only: by the time the edge counts bytes the node
+// has built the whole answer, so the ceiling stops the copy (the edge's and
+// Cloudflare's bandwidth, and the node's write of the rest), not the node's
+// memory. The chain's per-tx result byte cap is what bounds that build;
+// these are set well above any answer that cap and the block limits allow
+// (block max_bytes 22 MiB, mempool max_tx_bytes 1 MiB, base64 in JSON).
+const (
+	maxRespTx           = 8 << 20  // RPC tx, LCD txs/{hash}: one tx and its result
+	maxRespBlockResults = 32 << 20 // one block's results
+	maxRespSearch       = 32 << 20 // LCD tx.height=N: at most 50 txs with results
+	maxRespBlock        = 48 << 20 // RPC block: a full block, base64 in JSON
+	maxRespBlockLCD     = 96 << 20 // LCD block: block and sdk_block, both in full
+)
+
+// Downstream writes (round-6 R6-E-4). The slot is held while the answer
+// streams to the client, because the node is still writing it (it builds
+// the whole answer first, then writes; until the edge has read it the
+// node holds it in memory). A client that reads slowly would therefore
+// keep the node's answer and the slot alive. Each write to the client must
+// finish within writeStall, and the whole copy within writeMax; past either
+// the connection is dropped and the slot freed. Once the node's answer has
+// been read to its end, the slot is released before the last write.
+var (
+	writeStall = 10 * time.Second
+	writeMax   = 45 * time.Second
+)
 
 // upstreamResult is what the node answered.
 type upstreamResult struct {
@@ -72,13 +107,21 @@ type upstreamResult struct {
 // answers, then closes that answer unread. At most cap such goroutines exist
 // per class. holdCeiling bounds even that: a node silent that long is
 // wedged, and the request is dropped.
+//
+// After the node answers, the slot is held while its answer streams to the
+// client, until the answer has been read from the node to its end (see
+// writeStall, writeMax): at most writeMax longer, less for a client that
+// reads at all.
 func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 	method, pathQuery string, body []byte, header http.Header, o fwdOpts) {
-	release := cl.acquire(r.Context(), u.classes.isBackend(r))
-	if release == nil {
+	backend := u.classes.isBackend(r)
+	acquired := cl.acquire(r.Context(), backend)
+	if acquired == nil {
 		busy(w, r)
 		return
 	}
+	var once sync.Once
+	release := func() { once.Do(acquired) }
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), holdCeiling)
 	var rd io.Reader
 	if body != nil {
@@ -123,6 +166,14 @@ func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 		return
 	}
 	defer res.resp.Body.Close()
+	limit := o.maxResp
+	if backend {
+		limit = 0
+	}
+	if limit > 0 && res.resp.ContentLength > limit {
+		http.Error(w, "answer too large", http.StatusBadGateway)
+		return
+	}
 	h := w.Header()
 	for _, k := range passResponseHeaders {
 		if vs := res.resp.Header.Values(k); len(vs) > 0 {
@@ -133,8 +184,46 @@ func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 		h.Set("Cache-Control", o.cache)
 	}
 	w.WriteHeader(res.resp.StatusCode)
+	if !copyAnswer(w, res.resp.Body, limit, release) {
+		// Past the ceiling: the status is already sent, so the only honest
+		// answer is a broken one. The deferred closes and release run.
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// copyAnswer streams the node's answer to the client: at most limit bytes
+// (0: no limit), each write under writeStall and all of them under writeMax.
+// It calls release as soon as the node's answer has been read to its end.
+// It returns false only when the answer passed limit.
+func copyAnswer(w http.ResponseWriter, src io.Reader, limit int64, release func()) bool {
+	rc := http.NewResponseController(w)
+	end := time.Now().Add(writeMax)
 	buf := make([]byte, 32<<10)
-	_, _ = io.CopyBuffer(w, res.resp.Body, buf)
+	var total int64
+	for {
+		n, err := io.ReadFull(src, buf)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			release() // the node is done with this request
+		}
+		total += int64(n)
+		if limit > 0 && total > limit {
+			return false
+		}
+		if n > 0 {
+			d := time.Now().Add(writeStall)
+			if d.After(end) {
+				d = end
+			}
+			// ErrNotSupported only off a real connection (tests).
+			_ = rc.SetWriteDeadline(d)
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return true
+			}
+		}
+		if err != nil {
+			return true
+		}
+	}
 }
 
 // abandon waits, holding the slot, until the node answers a request whose

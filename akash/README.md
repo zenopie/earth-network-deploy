@@ -133,10 +133,16 @@ The filter:
   not `Simulate`;
 - **models the node's real bottleneck**: CometBFT runs the app behind one mutex that
   consensus also waits on. Every public call that takes it (RPC `abci_query`, both
-  broadcasts, `abci_info`) is one class of 2 slots, plus 1 for the backend;
+  broadcasts, `abci_info`) is in one of two classes, reads and broadcasts, 1 public
+  slot and 1 backend slot each: at most 4 holders, and a read flood cannot starve
+  broadcasts;
+- **caps answers sized by chain data** (`block_results`, a tx by hash): a small
+  class and a byte ceiling per call (below); the chain's per-tx result cap is the
+  real bound;
 - bounds bodies (1 MiB each; read before any slot is taken, under a deadline of
   2 s + 128 KiB/s of their size; charged, copies included, to a 48 MiB byte budget,
-  16 MiB for the backend, until answered), headers (16 KiB) and time, keeps
+  16 MiB for the backend, until answered; reserved in chunks that grow with what
+  has arrived, starting at 4 KiB, so a silent body holds 24 KiB), headers (16 KiB) and time, keeps
   **no per-client state**,
   passes the node only `Origin`, `Accept`, the CORS preflight headers and (LCD)
   `x-cosmos-block-height`, and **logs no request** (NO_LOGS.md);
@@ -204,20 +210,38 @@ an address search runs their own node with the kv indexer and `index-events` emp
 Concurrent calls the filter lets through to the node, per class (`filter/limit.go`):
 public slots, the backend's reserved slots, and how long a call waits for a slot
 before its `503`. A slot is held until the node answers; the client gets `504` at the
-class's deadline but the slot stays taken until then.
+class's deadline but the slot stays taken until then. It is also held while the
+answer streams to the client, but a client that stops reading is cut off after 10 s
+without progress (45 s for the whole answer), and the slot is freed as soon as the
+node's answer has been read to its end.
 
 | Class | What | Public | Backend | Waits |
 | --- | --- | --- | --- | --- |
-| light | status, block, commit, validators, consensus_params, tx by hash, LCD blocks and by-hash tx, preflights | 24 | +4 | 2 s |
-| results | block_results, blockchain, genesis_chunked | 8 | +4 | 2 s |
+| light | status, block, commit, validators, consensus_params, LCD blocks, preflights | 20 | +3 | 2 s |
+| results | blockchain, genesis_chunked | 8 | +4 | 2 s |
+| bulk | answers sized by chain data: `block_results`, RPC `tx`, LCD `txs/{hash}` | 3 | +1 | 2 s |
 | query | LCD gRPC GETs (outside the ABCI mutex, metered by query gas) | 12 | +4 | 2 s |
-| abci | everything that takes CometBFT's ABCI mutex: RPC `abci_query` (gRPC paths and `/store/` reads), `broadcast_tx_*`, LCD POST txs (CheckTx), `abci_info` | 2 | +1 | 4 s |
+| abci-query | RPC `abci_query` (gRPC paths and `/store/` reads), `abci_info`: ABCI mutex | 1 | +1 | 4 s |
+| broadcast | `broadcast_tx_sync`/`_async`, LCD POST txs (CheckTx): ABCI mutex | 1 | +1 | 4 s |
 | simulate | LCD simulate (CPU outside the mutex, bounded by `simulation_gas_limit`) | 2 | +1 | 4 s |
 | search | LCD tx search, `tx.height=N` only | 1 | 0 | 2 s |
 
-Together at most 63 calls at the node, under its 100 RPC and 200 API connection caps;
-at most 3 of them hold or queue on the ABCI mutex, so a consensus step waits behind at
-most three bounded calls. A changed allowlist or cap is a change to `edge/filter/`
+Together at most 63 calls at the node, under its 100 RPC and 200 API connection caps
+and the edge's 64 connections per upstream. At most 4 of them hold or queue on the
+ABCI mutex, so a consensus step waits behind at most four bounded calls; reads and
+broadcasts have separate slots, so a flood of `abci_query` cannot refuse wallet
+broadcasts (round-6 R6-E-3).
+
+**Answer ceilings** (round-6 R6-E-1). A public answer to `tx` / `txs/{hash}` is cut
+off past 8 MiB, `block_results` and the `tx.height=N` search past 32 MiB, RPC `block`
+past 48 MiB and LCD blocks past 96 MiB (declared larger: `502`; streamed past it: the
+connection is aborted). The backend has no ceiling. This is a backstop: the node has
+built the whole answer before the edge counts a byte, and a wasm tx can make its stored
+result tens of MB, which the node builds several times over per request. The `bulk`
+class bounds how many such builds run at once; **the chain's per-tx result byte cap
+is the real fix**, since it bounds what any one of these answers can be.
+
+A changed allowlist or cap is a change to `edge/filter/`
 here, with a case in its tests, then `bin/build-edge.sh --pin`; it goes onto the lease
 with an in-place PUT (`bin/deploy.sh`) like any image change. A chain release that
 adds or changes a route a client needs, or changes what gas-check reads, needs this

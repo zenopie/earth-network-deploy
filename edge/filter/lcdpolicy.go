@@ -24,8 +24,9 @@ type lcdSpec struct {
 	grpc    string // full gRPC method; "" for the tx service (never over abci_query)
 	page    bool   // the request has a PageRequest: pagination.* served, limit injected
 	params  map[string]string
-	class   string // light, query, search, abci, simulate (default query)
+	class   string // light, bulk, query, search, broadcast, simulate (default query)
 	body    []string
+	maxResp int64 // answer byte ceiling for public requests (0: none; forward.go)
 }
 
 var (
@@ -38,17 +39,18 @@ var (
 
 var lcdSpecs = []lcdSpec{
 	// --- tx -------------------------------------------------------------
-	// CheckTx: takes the ABCI mutex, so it is in the abci class with the
-	// RPC's broadcasts and queries.
-	{method: "POST", pattern: "/cosmos/tx/v1beta1/txs", class: "abci",
+	// CheckTx: takes the ABCI mutex, so it is in the broadcast class with
+	// the RPC's broadcasts (limit.go).
+	{method: "POST", pattern: "/cosmos/tx/v1beta1/txs", class: "broadcast",
 		body: []string{"tx_bytes", "txBytes", "mode"}},
 	{method: "POST", pattern: "/cosmos/tx/v1beta1/simulate", class: "simulate",
 		// cosmpy simulates with the legacy JSON `tx`; the wallets send tx_bytes.
 		body: []string{"tx_bytes", "txBytes", "tx"}},
-	// Commit polls: a point lookup in the tx index.
-	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs/{hash}", class: "light"},
+	// Commit polls and the wallets' activity: a point lookup in the tx
+	// index, but the answer is as large as the tx's stored result (bulk).
+	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs/{hash}", class: "bulk", maxResp: maxRespTx},
 	// The explorer's search: one block's txs (lcd.go checkSearch).
-	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs", class: "search", params: map[string]string{
+	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs", class: "search", maxResp: maxRespSearch, params: map[string]string{
 		"query":    searchQuery,
 		"order_by": `^ORDER_BY_(DESC|ASC|UNSPECIFIED)$`,
 		"limit":    `^([1-9]|[1-4][0-9]|50)$`,
@@ -57,8 +59,8 @@ var lcdSpecs = []lcdSpec{
 
 	// --- cosmos base ----------------------------------------------------
 	{method: "GET", pattern: "/cosmos/base/node/v1beta1/config", grpc: "/cosmos.base.node.v1beta1.Service/Config", class: "light"},
-	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/blocks/latest", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetLatestBlock", class: "light"},
-	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/blocks/{uint}", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetBlockByHeight", class: "light"},
+	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/blocks/latest", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetLatestBlock", class: "light", maxResp: maxRespBlockLCD},
+	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/blocks/{uint}", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetBlockByHeight", class: "light", maxResp: maxRespBlockLCD},
 	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/node_info", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetNodeInfo", class: "light"},
 	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/syncing", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetSyncing", class: "light"},
 	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/validatorsets/latest", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetLatestValidatorSet", page: true, class: "light"},
@@ -183,8 +185,10 @@ func buildLCDRoutes() []*lcdRoute {
 			rt.class = func(c *Classes) *class { return c.light }
 		case "search":
 			rt.class = func(c *Classes) *class { return c.search }
-		case "abci":
-			rt.class = func(c *Classes) *class { return c.abci }
+		case "bulk":
+			rt.class = func(c *Classes) *class { return c.bulk }
+		case "broadcast":
+			rt.class = func(c *Classes) *class { return c.broadcast }
 		case "simulate":
 			rt.class = func(c *Classes) *class { return c.simulate }
 		case "":
@@ -192,7 +196,7 @@ func buildLCDRoutes() []*lcdRoute {
 		default:
 			panic("lcdpolicy: class " + s.class)
 		}
-		rt.grpc, rt.page = s.grpc, s.page
+		rt.grpc, rt.page, rt.maxResp = s.grpc, s.page, s.maxResp
 		out = append(out, rt)
 	}
 	return out

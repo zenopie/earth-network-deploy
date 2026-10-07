@@ -58,9 +58,11 @@ func checkRPC(c *Classes, call rpcCall) (*class, error) {
 		return c.light, nil
 	case "abci_info":
 		// Cheap, but it takes the ABCI mutex (localClient.Info).
-		return c.abci, nil
-	case "block_results", "blockchain", "genesis_chunked":
+		return c.abciQuery, nil
+	case "blockchain", "genesis_chunked":
 		return c.results, nil
+	case "block_results":
+		return c.bulk, nil
 	case "validators":
 		if v := a["per_page"]; v.set && (v.i < 1 || v.i > 100) {
 			return nil, fmt.Errorf("%w: per_page must be 1..100", errRefused)
@@ -73,12 +75,12 @@ func checkRPC(c *Classes, call rpcCall) (*class, error) {
 		if len(a["hash"].b) != 32 {
 			return nil, fmt.Errorf("%w: hash must be 32 bytes", errRefused)
 		}
-		return c.light, nil
+		return c.bulk, nil
 	case "broadcast_tx_sync", "broadcast_tx_async":
 		if len(a["tx"].b) == 0 {
 			return nil, fmt.Errorf("%w: empty tx", errRefused)
 		}
-		return c.abci, nil
+		return c.broadcast, nil
 	case "abci_query":
 		return checkABCIQuery(c, a["path"].s, a["data"].b, a["prove"].t)
 	}
@@ -152,7 +154,7 @@ func checkABCIQuery(c *Classes, path string, data []byte, prove bool) (*class, e
 		if prove {
 			return nil, fmt.Errorf("%w: prove is not served on gRPC paths", errRefused)
 		}
-		return c.abci, nil
+		return c.abciQuery, nil
 	}
 	if !strings.HasPrefix(path, "/store/") {
 		return nil, fmt.Errorf("%w: abci_query path not served", errRefused)
@@ -170,7 +172,7 @@ func checkABCIQuery(c *Classes, path string, data []byte, prove bool) (*class, e
 		if len(data) == 0 || len(data) > maxStoreKey {
 			return nil, fmt.Errorf("%w: key must be 1..%d bytes", errRefused, maxStoreKey)
 		}
-		return c.abci, nil
+		return c.abciQuery, nil
 	case "subspace":
 		if prove {
 			return nil, fmt.Errorf("%w: prove is not served on subspace reads", errRefused)
@@ -178,7 +180,7 @@ func checkABCIQuery(c *Classes, path string, data []byte, prove bool) (*class, e
 		for _, r := range subspaceRules {
 			if r.store == module && bytes.HasPrefix(data, []byte(r.collection)) &&
 				len(data) >= r.min && len(data) <= maxStoreKey {
-				return c.abci, nil
+				return c.abciQuery, nil
 			}
 		}
 		return nil, fmt.Errorf("%w: subspace prefix not served", errRefused)
