@@ -1,0 +1,5 @@
+# The build needs go.mod, main.go and filter/ only.
+*
+!go.mod
+!main.go
+!filter/
