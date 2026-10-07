@@ -69,31 +69,62 @@ type fwdOpts struct {
 // by chain data. A backstop only: by the time the edge counts bytes the node
 // has built the whole answer, so the ceiling stops the copy (the edge's and
 // Cloudflare's bandwidth, and the node's write of the rest), not the node's
-// memory. What bounds the build is the chain: consensus block max_bytes
-// 4 MiB (genesis), a tx's stored result capped at 1 MiB (app/result_cap.go,
-// about 10 MB of results per block at worst), and a default node admitting
-// txs up to 1 MiB (mempool max_tx_bytes). In JSON, bytes are base64 (4/3)
-// and an event attribute costs up to ~4.6x its proto size (one-byte keys and
-// values), ~6x when its characters are ones encoding/json escapes as
-// \u00XX (<, >, &, control bytes, invalid UTF-8). Each ceiling for a single
-// tx or block sits above the largest answer those allow:
+// memory. What bounds the build is the chain (chaincaps.go, each value
+// checked against the pinned chain by edge/conformance):
+//
+//   - a block: max_bytes 4 MiB, evidence up to 1 MiB of it;
+//   - a tx: at most nodeMaxTxBytes (1 MiB, the only proposer's mempool);
+//   - a tx's stored result: MaxTxResultBytes (1 MiB) of msg results for any
+//     tx with a non-relay msg, plus its ante events (under txAnteBytes) and
+//     a log cut to MaxErrorBytes. A relay tx (only MsgRecvPacket,
+//     MsgAcknowledgement, MsgTimeout, client updates: what a relayer sends)
+//     has no byte cap, only gas: FreeBytes + gas / GasPerByte, about 5 MB at
+//     the 100M block gas. Ceilings are sized for the first kind, every tx a
+//     wallet or contract call can make; a relay tx past them is cut for the
+//     public like an oversized block_results, and shed (shed.go). Relayers
+//     read the node directly, inside the lease, and the backend has no
+//     ceiling.
+//
+// In JSON, bytes are base64 (4/3) and an event attribute costs up to ~4.6x
+// its proto size (one-byte keys and values), ~6x when its characters are
+// ones encoding/json escapes as \u00XX (<, >, &, control bytes, invalid
+// UTF-8): jsonPerResultByte. Each single-tx and single-block ceiling is the
+// largest answer those allow, plus a quarter for what the estimate misses,
+// rounded up to a MiB. edge/conformance recomputes each largest answer
+// from the pinned chain's own numbers and fails if a ceiling is under it.
 const (
-	// RPC tx: a 1 MiB tx (1.33 MiB) and a 1 MiB result (~4.6 MiB, ~6 MiB
-	// all escaped): ~6-7.4 MiB.
-	maxRespTx = 8 << 20
-	// LCD txs/{hash}: the tx twice (tx and tx_response.tx) and the
-	// result: ~7.5 MiB, under 12 MiB with an all-escaped result too.
-	maxRespTxLCD = 12 << 20
-	// One block's results: ~10 MB of results at worst, which only a block
-	// built to be large reaches; past this a public read of it is cut.
+	jsonPerResultByte = 6
+	txAnteBytes       = 8 << 10 // a private tx's ante events, 6.5 KB at most (chain resultcap doc)
+	answerEnvelope    = 64 << 10
+	// The largest stored result of a tx that is not all relay msgs.
+	maxTxResult = chainMaxTxResultBytes + txAnteBytes + chainMaxErrorBytes
+
+	// RPC tx: the tx in base64 and the result: ~7.4 MiB at the chain's
+	// caps, ceiling 10 MiB.
+	maxRespTx = (largestRPCTx*5/4 + 1<<20 - 1) >> 20 << 20
+	// LCD txs/{hash}: the tx twice (tx and tx_response.tx), decoded to JSON
+	// (counted at 2x its bytes each), and the result: ~10.1 MiB, ceiling
+	// 13 MiB.
+	maxRespTxLCD = (largestLCDTx*5/4 + 1<<20 - 1) >> 20 << 20
+	// RPC block: txs in base64 and evidence in JSON at up to 3x its proto
+	// size (votes with base64 signatures and hex hashes), sharing
+	// max_bytes: ~7.1 MiB, ceiling 9 MiB.
+	maxRespBlock = (largestRPCBlock*5/4 + 1<<20 - 1) >> 20 << 20
+	// LCD block: block and sdk_block, both in full: ceiling 18 MiB.
+	maxRespBlockLCD = (2*largestRPCBlock*5/4 + 1<<20 - 1) >> 20 << 20
+
+	// One block's results: paid bytes up to block gas / GasPerByte (5 MB)
+	// plus every tx's free allowance, ~10 MB of results at worst, up to
+	// ~60 MB of JSON, which only a block built to be large reaches. Not
+	// sized to fit it: past this a public read of the height is cut, and
+	// shed. The indexer (the backend) has no ceiling.
 	maxRespBlockResults = 32 << 20
-	// LCD tx.height=N: at most 50 txs with their results.
+	// LCD tx.height=N: at most 50 txs with their results; cut likewise.
 	maxRespSearch = 32 << 20
-	// RPC block: 4 MiB, txs in base64 and up to 1 MiB of evidence in JSON:
-	// ~7 MiB.
-	maxRespBlock = 12 << 20
-	// LCD block: block and sdk_block, both in full.
-	maxRespBlockLCD = 24 << 20
+
+	largestRPCTx    = (nodeMaxTxBytes+2)/3*4 + jsonPerResultByte*maxTxResult + answerEnvelope
+	largestLCDTx    = 2*2*nodeMaxTxBytes + jsonPerResultByte*maxTxResult + answerEnvelope
+	largestRPCBlock = (chainBlockMaxBytes-chainEvidenceMaxBytes+2)/3*4 + 3*chainEvidenceMaxBytes + answerEnvelope
 )
 
 // Downstream writes (round-6 R6-E-4). The slot is held while the answer

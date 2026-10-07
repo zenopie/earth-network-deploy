@@ -240,23 +240,31 @@ const holdCeiling = 3 * time.Minute
 // chain rather than by the request. The node builds each such answer in
 // memory several times over (round-6 R6-E-1 measured ~6x), and each also
 // has a byte ceiling (forward.go, fwdOpts.maxResp). Neither stops the
-// node's build of one answer: what bounds the build is the chain's per-tx
-// result cap (app/result_cap.go: 1 MiB per tx, about 10 MB per block).
+// node's build of one answer: what bounds the build is the chain's result
+// caps (chaincaps.go: 1 MiB of msg results for a tx with any non-relay msg;
+// a relay tx only by gas, ~5 MB at the block's 100M; ~10 MB per block).
+// What keeps those builds few: the class sizes, the per-client bound (one
+// address holds at most 1 bulk and 2 txhash slots), and shedding (shed.go:
+// an answer once found over its ceiling is not built again for the public).
 //
 //   - bulk: block_results. One block's results, up to ~10 MB of proto for
 //     a block built to be large: few at a time, and the backend (the
 //     indexer) keeps a slot.
-//   - txhash: one tx by hash (RPC tx, LCD txs/{hash}). Its answer is
-//     bounded by the per-tx cap (a few MiB of JSON at worst, forward.go),
-//     so it does not need block_results' tiny class, and it is what every
-//     wallet's commit poll and activity refresh calls. It has its own
-//     slots so that anonymous block_results reads, however heavy, cannot
-//     make a committed tx look unconfirmed (round-7 R7-D-1).
+//   - txhash: one tx by hash (RPC tx, LCD txs/{hash}). It is what every
+//     wallet's commit poll and activity refresh calls, almost always a
+//     millisecond point read. It has its own slots so that anonymous
+//     block_results reads, however heavy, cannot make a committed tx look
+//     unconfirmed (round-7 R7-D-1). A tx built to be heavy (1 MiB of results
+//     for ~21M gas, ~0.1 ERTH) still costs a build per request, so one
+//     address may hold only 2 of the 8 slots; a relay tx heavier than the
+//     ceiling (up to ~5 MB of results for 100M gas, ~0.5 ERTH) is built
+//     once per shedTTL per form (RPC, RPC with prove, LCD) for everyone
+//     together.
 type Classes struct {
 	light     *class // point reads that do not touch the app: status, a block, a commit
 	results   *class // block ranges (headers), genesis_chunked: larger bodies of fixed size
 	bulk      *class // block_results: one block's results, sized by chain data (above)
-	txhash    *class // RPC tx, LCD txs/{hash}: one tx, bounded by the per-tx result cap
+	txhash    *class // RPC tx, LCD txs/{hash}: one tx, sized by the chain's result caps
 	query     *class // LCD gRPC GETs: run outside the ABCI mutex, metered by query gas
 	abciQuery *class // RPC abci_query, abci_info: under the ABCI mutex
 	broadcast *class // RPC broadcast_tx_sync/async, LCD POST txs (CheckTx): under the ABCI mutex

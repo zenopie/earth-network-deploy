@@ -97,3 +97,21 @@ func MatchLCDPath(method, rawPath string) (string, bool) {
 func AnswerCeilings() (tx, txLCD, blockResults, search, block, blockLCD int64) {
 	return maxRespTx, maxRespTxLCD, maxRespBlockResults, maxRespSearch, maxRespBlock, maxRespBlockLCD
 }
+
+// ChainCaps lists the chain limits the ceilings are computed from
+// (chaincaps.go), by the name the conformance test reads each under in the
+// pinned chain.
+func ChainCaps() map[string]int64 {
+	out := make(map[string]int64, len(chainCaps))
+	for k, v := range chainCaps {
+		out[k] = v
+	}
+	return out
+}
+
+// TxAllowances: the stored-result bytes a tx may add outside the chain's
+// msg-result cap (its ante events and log), and the JSON bytes per stored
+// result byte, as the ceilings assume them (forward.go).
+func TxAllowances() (anteBytes, jsonPerByte int64) {
+	return txAnteBytes, jsonPerResultByte
+}
