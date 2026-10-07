@@ -261,9 +261,9 @@ chain tunnel (one token, one live connector).
    from Cloudflare's cache** (Caching → Purge Cache → Custom Purge, by URL prefix): a
    relaunch under the same hostname has a new genesis. The allowlist itself is `edge`,
    in the SDL: nothing to configure. After the node is up, run
-   `bin/check-edge.py` (exit 0, every line `ok`) and that section's manual checks; a
-   missing `X-Earth-Edge` or a `tx_search` that answers means a hostname points at the
-   node. Keep `bin/check-edge.py` on a schedule from then on. The node-side limits are
+   `bin/check-edge.py` (exit 0, every line `ok`), then that section's manual checks; a
+   missing `X-Earth-Edge` means a hostname points at the node (fix it before the
+   manual checks, some of which are scans). Keep `bin/check-edge.py` on a schedule from then on. The node-side limits are
    in the SDL too (`limits:`, `index:` and `edge:` lines of the dry run, `rpc_subs=0`);
    its `edge image:` line must be the digest section 1.4 pinned.
 5. **Cloudflare no-logs settings** (NO_LOGS.md, "Cloudflare settings"): no Logpush

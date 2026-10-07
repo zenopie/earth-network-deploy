@@ -13,7 +13,14 @@ the public unfiltered at once. Nothing in the SDL can see it.
 
 The tell is the X-Earth-Edge header: earth-edge sets it on every answer,
 served or refused, and the node never does. On top of that, a few calls
-the edge refuses and the node would serve must come back refused.
+the edge refuses must come back refused by it.
+
+Every probe is cheap for the node too (round-6 R6-E-5): the case this
+script exists for is a hostname that reaches the node unfiltered, and then
+the node runs whatever the script sends, on every scheduled run. So the
+refused probes are method or route names no node serves (an instant 404),
+a Simulate of one invalid byte (fails to decode) and a count over the
+validator set; never a search.
 
 Standard library only; sends nothing but public requests.
 """
@@ -23,9 +30,8 @@ import sys
 import urllib.error
 import urllib.request
 
-# The fee collector: every tx pays it, so a search on it is the whole history
-# (R5-E-1). The node would run it; the edge refuses it.
-FEE_COLLECTOR = "earth17xpfvakm2amg962yls6f84z3kell8c5lthcx95"
+# A name the edge refuses and no node serves: free to probe either way.
+PROBE = "earth_edge_probe"
 UA = "earth-check-edge/1"
 
 
@@ -53,11 +59,10 @@ def main():
     checks = [
         # (what, url, body, want: "served" or "refused")
         ("rpc status", rpc + "/status", None, "served"),
-        ("rpc tx_search", rpc + '/tx_search?query="tx.height>0"', None, "refused"),
+        ("rpc unknown method", rpc + "/" + PROBE, None, "refused"),
         ("rpc abci_query Simulate", rpc + "/", simulate, "refused"),
         ("lcd syncing", lcd + "/cosmos/base/tendermint/v1beta1/syncing", None, "served"),
-        ("lcd fee-collector search", lcd + "/cosmos/tx/v1beta1/txs?query=transfer.recipient%3D%27"
-         + FEE_COLLECTOR + "%27&limit=1", None, "refused"),
+        ("lcd unknown route", lcd + "/earth/edge/v1/" + PROBE, None, "refused"),
         ("lcd count_total", lcd + "/cosmos/staking/v1beta1/validators?pagination.count_total=true", None, "refused"),
     ]
     failed = 0

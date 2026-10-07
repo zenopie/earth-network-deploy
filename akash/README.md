@@ -373,15 +373,18 @@ normalization would rewrite); leaving it on is harmless.
 
 First the automated check, which also belongs in a schedule (cron, or any alerting
 job: it exits 1 on a failure). It asserts the `X-Earth-Edge` header on both hostnames
-and that a scan, an address search, `Simulate` over `abci_query` and `count_total`
-come back refused by the filter (R5-E-8):
+and that an unknown RPC method, an unknown LCD route, `Simulate` over `abci_query` and
+`count_total` come back refused by the filter (R5-E-8). Every probe is cheap for the
+node as well, since a misrouted hostname hands the node whatever the check sends, on
+every scheduled run (R6-E-5):
 
     bin/check-edge.py          # --rpc/--lcd to point it elsewhere
 
-Then by hand, from an address that does not hold the token. Expect `403` with `refused by the edge
-filter` unless noted. A `200` on any of the refused lines, or a `tx_search` that
-answers, means the hostname reaches the node directly instead of `edge`: fix the
-Public Hostname before anything else.
+Then by hand, from an address that does not hold the token, **only once the automated
+check passes**: several of these are scans the node would run in full if a hostname
+reached it directly. Expect `403` with `refused by the edge filter` unless noted. A
+`200` on any of the refused lines means the hostname reaches the node directly
+instead of `edge`: fix the Public Hostname before anything else.
 
     R=https://rpc.erth.network L=https://lcd.erth.network
     c() { curl -s -o /dev/null -w '%{http_code}\n' "$@"; }
