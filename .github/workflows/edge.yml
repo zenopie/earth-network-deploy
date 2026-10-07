@@ -1,0 +1,33 @@
+# earth-edge: the filter's tests and fuzz seeds, and conformance against the
+# chain commit edge/conformance/chain.pin names. CI is set by Actions, so a
+# conformance test that cannot find the pinned chain fails instead of skipping.
+name: edge
+on:
+  push:
+    paths: ["edge/**", ".github/workflows/edge.yml"]
+  pull_request:
+    paths: ["edge/**", ".github/workflows/edge.yml"]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: edge/go.mod
+          cache: false
+      - name: filter
+        working-directory: edge
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -mod=readonly ./...
+      - name: fetch the pinned chain
+        run: edge/conformance/fetch-chain.sh
+      - name: conformance
+        working-directory: edge/conformance
+        run: |
+          go vet ./...
+          go test -mod=readonly ./...
