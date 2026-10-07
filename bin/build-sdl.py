@@ -71,8 +71,24 @@ EXPECTED_CHAIN_ID = "earth-1"
 # keys that signed an earlier earth-1, whose signatures at the same heights
 # under the same chain id are double-sign evidence: never again.
 LAUNCH = json.load(open(os.path.join(repo, "launch/launch.json")))
+
+
+def ed25519_pub(text, what):
+    """The 32 key bytes of a base64 ed25519 pubkey, refusing any non-canonical
+    spelling: keys are compared as bytes, so a padding or alphabet variant of a
+    used key cannot pass as a new one (round-7 R7-C-4)."""
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except Exception as e:
+        raise AssertionError("%s is not base64: %s" % (what, e))
+    assert len(raw) == 32 and base64.b64encode(raw).decode() == text, (
+        "%s is not the canonical base64 of a 32-byte ed25519 key" % what)
+    return raw
+
+
 EXPECTED_CONSENSUS_PUBKEY = LAUNCH["consensus_pubkey"]
-USED_CONSENSUS_PUBKEYS = set(LAUNCH["used_consensus_keys"])
+EXPECTED_CONSENSUS_RAW = ed25519_pub(EXPECTED_CONSENSUS_PUBKEY, "launch.json consensus_pubkey")
+USED_CONSENSUS_RAW = {ed25519_pub(k, "launch.json used_consensus_keys") for k in LAUNCH["used_consensus_keys"]}
 no_statesync = args.no_statesync
 # earth-edge's image (edge/, bin/build-edge.sh). The SDL pins it by digest
 # in the file; the all-zero digest is the placeholder before the first build.
@@ -256,13 +272,13 @@ if fullnode:
         # signed an earlier earth-1. A swapped .env otherwise brings up a
         # validator with no power, or re-signs old heights with the old key.
         pub = pvk["pub_key"].get("value", "")
-        assert pub not in USED_CONSENSUS_PUBKEYS, (
+        raw = ed25519_pub(pub, "PRIV_VALIDATOR_KEY_B64 pub_key")
+        assert raw not in USED_CONSENSUS_RAW, (
             "PRIV_VALIDATOR_KEY_B64 is a consensus key that signed an earlier "
             "earth-1 (%s…). It must never sign again under this chain id." % pub[:8])
-        assert pub == EXPECTED_CONSENSUS_PUBKEY, (
+        assert raw == EXPECTED_CONSENSUS_RAW, (
             "PRIV_VALIDATOR_KEY_B64 pubkey %s… is not the launch gentx's %s…"
             % (pub[:8], EXPECTED_CONSENSUS_PUBKEY[:8]))
-        raw = base64.b64decode(pub)
         addr = hashlib.sha256(raw).hexdigest()[:40].upper()
         assert pvk["address"].upper() == addr, (
             "priv_validator_key.json address %s does not derive from its pubkey "
@@ -274,7 +290,7 @@ if fullnode:
                 "--genesis %s does not hash to akash/genesis.sha256" % args.genesis)
             gtx = json.loads(graw)["app_state"]["genutil"]["gen_txs"]
             gpubs = [m.get("pubkey", {}).get("key") for t in gtx for m in t["body"]["messages"]]
-            assert pub in gpubs, (
+            assert raw in {base64.b64decode(g or "") for g in gpubs}, (
                 "the pinned genesis's gentx names %s, not this key" % gpubs)
     else:
         assert "PRIV_VALIDATOR_KEY_B64" not in n, (

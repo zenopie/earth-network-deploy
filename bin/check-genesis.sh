@@ -51,7 +51,7 @@ check() {  # <label> <file>
   local got; got="$(sha "$2")"
   if [ "$got" = "$PIN" ]; then echo "ok    $1  $got"; else echo "FAIL  $1  $got (pin $PIN)"; FAIL=1; fi
   python3 - "$2" "$WANT_CHAIN_ID" "$ALLOW_PLACEHOLDER" "$HERE/launch/launch.json" <<'PY' || FAIL=1
-import json, sys, datetime
+import base64, json, sys, datetime
 # The ceremony's facts: launch/launch.json, the file the chain repo's
 # scripts/ceremony.sh --launch took (RELAUNCH.md).
 L = json.load(open(sys.argv[4]))
@@ -106,7 +106,14 @@ for tx in gt:
     for m in tx["body"]["messages"]:
         val = m.get("validator_address", "")
         pub = m.get("pubkey", {}).get("key", "")
-        if pub != CONSENSUS_PUBKEY:
+        # As bytes: a non-canonical spelling of a key must not compare unequal
+        # to its canonical form, nor equal to a different key (R7-C-4).
+        try:
+            pub_raw = base64.b64decode(pub, validate=True)
+        except Exception:
+            pub_raw = None
+        if pub_raw is None or pub_raw != base64.b64decode(CONSENSUS_PUBKEY, validate=True) \
+                or base64.b64encode(pub_raw).decode() != pub:
             print("FAIL  gentx consensus pubkey %s, launch key is %s" % (pub, CONSENSUS_PUBKEY)); ok = False
         if not val or b32_data(val) != b32_data(OPERATOR):
             placeholder("gentx operator %s is not %s's" % (val, OPERATOR))
