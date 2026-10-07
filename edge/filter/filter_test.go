@@ -595,7 +595,7 @@ func TestBusy(t *testing.T) {
 	lcd := NewLCD(node.URL, &http.Client{Transport: NewTransport()}, c)
 	q := get("/cosmos/tx/v1beta1/txs?query=tx.height%3D5")
 	go do(lcd, q) // holds the one search slot
-	for len(c.search.sem) == 0 {
+	for used(c.search) == 0 {
 		// wait for the first to take its slot
 	}
 	if w := do(lcd, q); w.Code != http.StatusServiceUnavailable {

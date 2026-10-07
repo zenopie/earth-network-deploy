@@ -82,10 +82,10 @@ func TestAnswerCeiling(t *testing.T) {
 		}
 
 		deadline := time.Now().Add(2 * time.Second)
-		for len(c.txhash.sem)+len(c.txhash.reserved) != 0 && time.Now().Before(deadline) {
+		for used(c.txhash) != 0 && time.Now().Before(deadline) {
 			time.Sleep(5 * time.Millisecond)
 		}
-		if k := len(c.txhash.sem) + len(c.txhash.reserved); k != 0 {
+		if k := used(c.txhash); k != 0 {
 			t.Fatalf("%d txhash slots still held", k)
 		}
 	}
@@ -121,11 +121,11 @@ func TestChainSizedClasses(t *testing.T) {
 		if err != nil || cl != tc.want {
 			t.Errorf("%s: class %v, %v", name, cl, err)
 		}
-		if rpcFwdOpts(name).maxResp == 0 {
+		if rpcFwdOpts(tc.call).maxResp == 0 {
 			t.Errorf("%s: no answer ceiling", name)
 		}
 	}
-	if rpcFwdOpts("block").maxResp == 0 {
+	if rpcFwdOpts(rpcCall{method: "block"}).maxResp == 0 {
 		t.Errorf("block: no answer ceiling")
 	}
 	for _, rt := range lcdRoutes {
@@ -143,17 +143,20 @@ func TestChainSizedClasses(t *testing.T) {
 			t.Errorf("%s: no LCD route shares block_results' class", rt.pattern)
 		}
 	}
-	if n := cap(c.bulk.sem) + cap(c.bulk.reserved); n > 4 {
+	if n := slots(c.bulk); n > 4 {
 		t.Errorf("bulk class holds %d", n)
 	}
-	if cap(c.txhash.sem) < 8 || cap(c.txhash.reserved) < 1 {
-		t.Errorf("txhash class %d+%d: too small for wallet commit polls", cap(c.txhash.sem), cap(c.txhash.reserved))
+	if p, r := c.txhash.caps(); p < 8 || r < 1 {
+		t.Errorf("txhash class %d+%d: too small for wallet commit polls", p, r)
 	}
 	// A tx by hash still gets an answer while every bulk slot is busy.
-	for range cap(c.bulk.sem) {
-		c.bulk.sem <- struct{}{}
+	p, _ := c.bulk.caps()
+	for i := range p {
+		if c.bulk.acquire(t.Context(), false, uint64(i)) == nil {
+			t.Fatal("bulk slot refused")
+		}
 	}
-	if rel := c.txhash.acquire(t.Context(), false); rel == nil {
+	if rel := c.txhash.acquire(t.Context(), false, 99); rel == nil {
 		t.Fatal("txhash slot refused while bulk is full")
 	} else {
 		rel()
@@ -185,14 +188,14 @@ func TestSlowReaderFreesSlot(t *testing.T) {
 	fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: x\r\n\r\n", txHashQ)
 	// Never read. The slot is taken, then freed when a write stalls.
 	deadline := time.Now().Add(time.Second)
-	for len(c.txhash.sem) == 0 && time.Now().Before(deadline) {
+	for used(c.txhash) == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	start := time.Now()
-	for len(c.txhash.sem) != 0 && time.Since(start) < 3*time.Second {
+	for used(c.txhash) != 0 && time.Since(start) < 3*time.Second {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if len(c.txhash.sem) != 0 {
+	if used(c.txhash) != 0 {
 		t.Fatalf("a client that stopped reading still holds its slot after %v", time.Since(start))
 	}
 }
@@ -224,7 +227,7 @@ func (b *blockingWriter) Write(p []byte) (int, error) {
 func TestSlotsFitConnections(t *testing.T) {
 	n := 0
 	for _, cl := range DefaultClasses().all() {
-		n += cap(cl.sem) + cap(cl.reserved)
+		n += slots(cl)
 	}
 	if max := NewTransport().MaxConnsPerHost; n > max {
 		t.Fatalf("%d slots, %d connections per upstream", n, max)

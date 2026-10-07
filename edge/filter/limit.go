@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -15,73 +16,197 @@ import (
 // queries ignore a dropped connection), so a slot freed at the client's
 // deadline would let a new request in while the old one still runs, and the
 // cap would not be a cap (round-5 R5-E-3). A request that cannot get a slot
-// within the class's wait is answered 503 at once.
+// within the class's wait is answered 503.
 //
-// There is no per-client state here. Per-address limits are Cloudflare's
-// (akash/README.md); this process never sees a client's
-// address except as a header it drops. The one distinction it makes is the
-// backend: a request carrying the backend's credential (its Authorization
-// header, checked against a SHA-256 the SDL holds, R5-E-7) may also use a
+// Per-client fairness (round-8 R8-D-1). A class's capacity is shared, so
+// without a per-client bound one or two addresses could keep every slot of
+// a class busy (Cloudflare's per-IP rate limit counts requests, not what
+// they hold) and everyone else would wait out the class's wait and get 503.
+// So each class also bounds what one client may have in it at once,
+// holding a slot or queued for one: perClient. A request over that is
+// answered 503 at once, without queueing. The slots are then granted in
+// arrival order (one FIFO queue per class; Go's channel send order was not
+// something to build on), so a waiting client is behind at most the
+// requests already queued, of which every other client has at most
+// perClient. In a class of 4 or more public slots two clients together
+// hold at most half of them (DefaultClasses, held to it by a test); in the
+// smallest classes (1 or 2 slots) a single client can hold a slot, and
+// fairness is the queue: a third client's request is granted after at most
+// the attackers' requests already queued, each one slot hold (a test).
+// The client is the address Cloudflare names (client.go); the counters are
+// keyed by a hash of it, held in memory only while that client has a
+// request held or queued, deleted the moment its count reaches zero, and
+// never logged (NO_LOGS.md).
+//
+// The one distinction besides the client is the backend: a request
+// carrying the backend's credential (its Authorization header, checked
+// against a SHA-256 the SDL holds, R5-E-7) is exempt from perClient (one
+// address does every user's gas grants and the indexer) and may also use a
 // few reserved slots in each class, so a public flood cannot starve gas
-// grants and the indexer. A leaked credential buys only those slots.
+// grants and the indexer. A leaked credential buys only those slots and
+// the public slots' share any client has.
 type class struct {
-	name     string
-	sem      chan struct{} // public slots
-	reserved chan struct{} // backend-only slots (nil: none)
-	wait     time.Duration // how long to queue for a slot
-	timeout  time.Duration // the client's answer deadline (the slot outlives it)
+	name      string
+	wait      time.Duration // how long to queue for a slot
+	timeout   time.Duration // the client's answer deadline (the slot outlives it)
+	perClient int           // public requests one client may hold or queue
+
+	mu      sync.Mutex
+	pubCap  int // public slots
+	resCap  int // backend-only slots
+	pubUsed int
+	resUsed int
+	queue   []*waiter      // FIFO; no waiter waits while a slot it may use is free
+	clients map[uint64]int // per client key: requests held or queued; no zero entries
 }
 
-func newClass(name string, public, reserved int, wait, timeout time.Duration) *class {
-	c := &class{name: name, sem: make(chan struct{}, public), wait: wait, timeout: timeout}
-	if reserved > 0 {
-		c.reserved = make(chan struct{}, reserved)
+type slotKind uint8
+
+const (
+	slotNone slotKind = iota
+	slotPublic
+	slotReserved
+)
+
+type waiter struct {
+	backend bool
+	ready   chan struct{} // closed when granted
+	slot    slotKind      // set under mu when granted
+}
+
+func newClass(name string, public, reserved, perClient int, wait, timeout time.Duration) *class {
+	return &class{name: name, pubCap: public, resCap: reserved, perClient: perClient,
+		wait: wait, timeout: timeout, clients: map[uint64]int{}}
+}
+
+// acquire takes a slot and returns its release, or nil if the client is at
+// its perClient bound or no slot came free within the wait. The backend
+// tries its reserve first, then the public slots, and has no per-client
+// bound; client is ignored for it.
+func (c *class) acquire(ctx context.Context, backend bool, client uint64) func() {
+	c.mu.Lock()
+	if !backend {
+		if c.clients[client] >= c.perClient {
+			c.mu.Unlock()
+			return nil
+		}
+		c.clients[client]++
 	}
-	return c
-}
-
-// acquire takes a slot and returns its release, or nil if none came free in
-// time. The backend tries its reserve first, then the public slots.
-func (c *class) acquire(ctx context.Context, backend bool) func() {
-	pub := func() { <-c.sem }
-	if backend && c.reserved != nil {
-		res := func() { <-c.reserved }
-		select {
-		case c.reserved <- struct{}{}:
-			return res
-		default:
-		}
-		select {
-		case c.sem <- struct{}{}:
-			return pub
-		default:
-		}
-		t := time.NewTimer(c.wait)
-		defer t.Stop()
-		select {
-		case c.reserved <- struct{}{}:
-			return res
-		case c.sem <- struct{}{}:
-			return pub
-		case <-t.C:
-		case <-ctx.Done():
-		}
+	// The queue holds no waiter that a free slot could serve (dispatch runs
+	// on every release), so a free slot here jumps no one.
+	if backend && c.resUsed < c.resCap {
+		c.resUsed++
+		c.mu.Unlock()
+		return c.releaser(slotReserved, backend, client)
+	}
+	if c.pubUsed < c.pubCap {
+		c.pubUsed++
+		c.mu.Unlock()
+		return c.releaser(slotPublic, backend, client)
+	}
+	if c.wait <= 0 {
+		c.forget(backend, client)
+		c.mu.Unlock()
 		return nil
 	}
-	select {
-	case c.sem <- struct{}{}:
-		return pub
-	default:
-	}
+	w := &waiter{backend: backend, ready: make(chan struct{})}
+	c.queue = append(c.queue, w)
+	c.mu.Unlock()
+
 	t := time.NewTimer(c.wait)
 	defer t.Stop()
 	select {
-	case c.sem <- struct{}{}:
-		return pub
+	case <-w.ready:
+		return c.releaser(w.slot, backend, client)
 	case <-t.C:
 	case <-ctx.Done():
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if w.slot != slotNone { // granted as the wait ended
+		return c.releaser(w.slot, backend, client)
+	}
+	for i, q := range c.queue {
+		if q == w {
+			c.queue = append(c.queue[:i], c.queue[i+1:]...)
+			break
+		}
+	}
+	c.forget(backend, client)
 	return nil
+}
+
+// forget drops one of a public client's requests from its count, and the
+// client's entry with its last one. Under c.mu.
+func (c *class) forget(backend bool, client uint64) {
+	if backend {
+		return
+	}
+	if n := c.clients[client] - 1; n > 0 {
+		c.clients[client] = n
+	} else {
+		delete(c.clients, client)
+	}
+}
+
+// releaser frees the slot (once) and hands it to the first waiter that may
+// use it.
+func (c *class) releaser(kind slotKind, backend bool, client uint64) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if kind == slotReserved {
+				c.resUsed--
+			} else {
+				c.pubUsed--
+			}
+			c.forget(backend, client)
+			c.dispatch()
+		})
+	}
+}
+
+// dispatch grants free slots to waiters in arrival order: a reserved slot
+// to the first backend waiter, a public slot to the first waiter. Under c.mu.
+func (c *class) dispatch() {
+	for i := 0; i < len(c.queue); {
+		w := c.queue[i]
+		switch {
+		case w.backend && c.resUsed < c.resCap:
+			c.resUsed++
+			w.slot = slotReserved
+		case c.pubUsed < c.pubCap:
+			c.pubUsed++
+			w.slot = slotPublic
+		default:
+			if c.pubUsed >= c.pubCap && c.resUsed >= c.resCap {
+				return
+			}
+			i++
+			continue
+		}
+		c.queue = append(c.queue[:i], c.queue[i+1:]...)
+		close(w.ready)
+	}
+}
+
+// inUse and caps report the slots (tests).
+func (c *class) inUse() (public, reserved int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pubUsed, c.resUsed
+}
+
+func (c *class) caps() (public, reserved int) { return c.pubCap, c.resCap }
+
+// clientCount reports how many clients the class holds counters for (tests:
+// zero once idle).
+func (c *class) clientCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.clients)
 }
 
 // holdCeiling: the longest a slot stays held for one upstream request. The
@@ -138,6 +263,8 @@ type Classes struct {
 	simulate  *class // LCD simulate: CPU (proofs, contract code), outside the mutex
 	search    *class // the LCD tx search, tx.height=N only: one block's txs
 
+	oversized *shedList // answers known to be over their ceiling (shed.go)
+
 	backendAuth []byte // SHA-256 of the backend's exact Authorization value; nil: no backend
 }
 
@@ -148,24 +275,32 @@ const abciMutexHolders = 4
 
 func DefaultClasses() *Classes {
 	w := 2 * time.Second
+	// perClient: two clients together hold at most half of any class of 4
+	// or more public slots; the classes of 1 or 2 slots give a client one
+	// and rely on the queue (above). TestPerClientBounds holds them to it.
+	//
 	// txhash: a commit poll is a point read in the tx index, milliseconds
 	// for an ordinary tx, so 8 slots serve hundreds of polls a second (a
 	// phone polls at most 20 times per tx, and the activity refresh a few
-	// hashes at a time). An attacker who wants them busy has to ask for txs
-	// near the 1 MiB result cap, each paid for and each a bounded build;
-	// block_results no longer competes for them. Every slot together is
-	// 64, the transport's MaxConnsPerHost (TestSlotsFitConnections); light
-	// gave up the slots txhash needed (its calls do not touch the app).
+	// hashes at a time). A tx's answer is sized by what it stored, which
+	// the chain bounds (forward.go, the answer ceilings); a client asking
+	// for the heaviest txs holds at most 2 of the 8, an answer once found
+	// over its ceiling is refused without asking the node again (shed.go),
+	// and block_results does not compete for these slots. Every slot
+	// together is 64, the transport's MaxConnsPerHost
+	// (TestSlotsFitConnections); light gave up the slots txhash needed (its
+	// calls do not touch the app).
 	return &Classes{
-		light:     newClass("light", 12, 3, w, 15*time.Second),
-		results:   newClass("results", 8, 4, w, 30*time.Second),
-		bulk:      newClass("bulk", 2, 1, w, 30*time.Second),
-		txhash:    newClass("txhash", 8, 2, w, 20*time.Second),
-		query:     newClass("query", 12, 4, w, 20*time.Second),
-		abciQuery: newClass("abci-query", 1, 1, 4*time.Second, 20*time.Second),
-		broadcast: newClass("broadcast", 1, 1, 4*time.Second, 20*time.Second),
-		simulate:  newClass("simulate", 2, 1, 4*time.Second, 30*time.Second),
-		search:    newClass("search", 1, 0, w, 10*time.Second),
+		light:     newClass("light", 12, 3, 3, w, 15*time.Second),
+		results:   newClass("results", 8, 4, 2, w, 30*time.Second),
+		bulk:      newClass("bulk", 2, 1, 1, w, 30*time.Second),
+		txhash:    newClass("txhash", 8, 2, 2, w, 20*time.Second),
+		query:     newClass("query", 12, 4, 3, w, 20*time.Second),
+		abciQuery: newClass("abci-query", 1, 1, 1, 4*time.Second, 20*time.Second),
+		broadcast: newClass("broadcast", 1, 1, 1, 4*time.Second, 20*time.Second),
+		simulate:  newClass("simulate", 2, 1, 1, 4*time.Second, 30*time.Second),
+		search:    newClass("search", 1, 0, 1, w, 10*time.Second),
+		oversized: newShedList(shedTTL, shedMax),
 	}
 }
 

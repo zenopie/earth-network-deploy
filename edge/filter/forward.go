@@ -59,6 +59,10 @@ type fwdOpts struct {
 	// streams past it is cut off mid-body (the connection is aborted, so
 	// the client sees a broken answer, never a short valid one).
 	maxResp int64
+	// shed, if set, names the answer for shedding (shed.go): a key made of
+	// the tx hash or block height only. An answer once found over maxResp
+	// is refused to public clients without asking the node again.
+	shed string
 }
 
 // Answer ceilings (round-6 R6-E-1), for the calls whose answer size is set
@@ -131,7 +135,19 @@ type upstreamResult struct {
 func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 	method, pathQuery string, body []byte, header http.Header, o fwdOpts) {
 	backend := u.classes.isBackend(r)
-	acquired := cl.acquire(r.Context(), backend)
+	shed := ""
+	if !backend && o.maxResp > 0 {
+		shed = o.shed
+	}
+	if u.classes.oversized.has(shed) {
+		http.Error(w, "answer too large", http.StatusBadGateway)
+		return
+	}
+	var client uint64
+	if !backend {
+		client = clientKey(r)
+	}
+	acquired := cl.acquire(r.Context(), backend, client)
 	if acquired == nil {
 		busy(w, r)
 		return
@@ -187,6 +203,7 @@ func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 		limit = 0
 	}
 	if limit > 0 && res.resp.ContentLength > limit {
+		u.classes.oversized.add(shed)
 		http.Error(w, "answer too large", http.StatusBadGateway)
 		return
 	}
@@ -203,6 +220,7 @@ func (u *nodeClient) forward(w http.ResponseWriter, r *http.Request, cl *class,
 	if !copyAnswer(w, res.resp.Body, limit, release) {
 		// Past the ceiling: the status is already sent, so the only honest
 		// answer is a broken one. The deferred closes and release run.
+		u.classes.oversized.add(shed)
 		panic(http.ErrAbortHandler)
 	}
 }

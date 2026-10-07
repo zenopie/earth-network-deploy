@@ -66,6 +66,9 @@ type lcdRoute struct {
 	page   bool   // its request has a PageRequest
 	// maxResp: the answer's byte ceiling for public requests (0: none).
 	maxResp int64
+	// shed: the shedding key's prefix (shed.go), for a route whose last
+	// segment names a fixed answer ("": none).
+	shed string
 }
 
 // Path parameter types, by the name used in lcdpolicy.go's patterns.
@@ -242,7 +245,12 @@ func (h *lcdHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if enc := q.Encode(); enc != "" {
 			pq += "?" + enc
 		}
-		h.up.forward(w, r, cl, http.MethodGet, pq, nil, hdr, fwdOpts{maxResp: rt.maxResp})
+		o := fwdOpts{maxResp: rt.maxResp}
+		if rt.shed != "" {
+			// The route's one {hash} segment, the last (lcdpolicy.go).
+			o.shed = rt.shed + "/" + strings.ToLower(parts[len(parts)-1])
+		}
+		h.up.forward(w, r, cl, http.MethodGet, pq, nil, hdr, o)
 	case http.MethodPost:
 		rt := h.find(http.MethodPost, parts)
 		if rt == nil {

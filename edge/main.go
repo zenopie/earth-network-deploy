@@ -10,9 +10,12 @@
 // It serves an allowlist (filter/rpcpolicy.go, filter/lcdpolicy.go), decodes every request
 // once the way the node would, and forwards a request it wrote itself, so
 // no encoding trick reaches the node. Expensive classes of call are bounded
-// in how many run at once (filter/limit.go). It keeps no per-client state and logs
-// no request: not an address, a path, a query or a body (NO_LOGS.md
-// at the repo root). Its only log lines are its start and a fatal error.
+// in how many run at once, and in how many one client may have going in each
+// (filter/limit.go). Its only per-client state is that count, keyed by a
+// hash of the client's address and dropped when the count reaches zero
+// (filter/client.go). It logs no request: not an address, a path, a query or
+// a body (NO_LOGS.md at the repo root). Its only log lines are its start and
+// a fatal error.
 //
 // Configuration (env): EDGE_RPC_LISTEN (:26657), EDGE_LCD_LISTEN (:1317),
 // EDGE_RPC_UPSTREAM (http://node:26657), EDGE_LCD_UPSTREAM

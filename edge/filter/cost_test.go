@@ -65,6 +65,10 @@ func fastClasses() *Classes {
 
 func client() *http.Client { return &http.Client{Transport: NewTransport()} }
 
+// used: a class's slots held, public and reserved; slots: its capacity.
+func used(cl *class) int  { p, r := cl.inUse(); return p + r }
+func slots(cl *class) int { p, r := cl.caps(); return p + r }
+
 const abciSupply = `/abci_query?path=%22/cosmos.bank.v1beta1.Query/SupplyOf%22&data=0x0a057565727468`
 
 // R5-E-1, R5-E-3: a request whose client deadline passes keeps its slot
@@ -90,7 +94,7 @@ func TestSlotHeldUntilNodeAnswers(t *testing.T) {
 	g.release()
 	// Once the node answers, the slots are free again.
 	deadline := time.Now().Add(2 * time.Second)
-	for len(c.abciQuery.sem) != 0 && time.Now().Before(deadline) {
+	for used(c.abciQuery) != 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if w := do(rpc, get(abciSupply)); w.Code != http.StatusOK {
@@ -104,10 +108,13 @@ func TestSlotHeldUntilNodeAnswers(t *testing.T) {
 // they never hold more than abciMutexHolders.
 func TestABCIClassesSplit(t *testing.T) {
 	c := DefaultClasses()
-	if n := cap(c.abciQuery.sem) + cap(c.abciQuery.reserved) + cap(c.broadcast.sem) + cap(c.broadcast.reserved); n != abciMutexHolders {
+	if n := slots(c.abciQuery) + slots(c.broadcast); n != abciMutexHolders {
 		t.Fatalf("ABCI classes hold %d, want %d", n, abciMutexHolders)
 	}
-	if cap(c.broadcast.reserved) == 0 || cap(c.abciQuery.reserved) == 0 {
+	if _, r := c.broadcast.caps(); r == 0 {
+		t.Fatalf("no backend reserve in an ABCI class")
+	}
+	if _, r := c.abciQuery.caps(); r == 0 {
 		t.Fatalf("no backend reserve in an ABCI class")
 	}
 
@@ -247,7 +254,7 @@ func TestSlowBodyShed(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	// No slot of any class is held by the 40 dribblers.
 	for _, cl := range c.all() {
-		if len(cl.sem) != 0 {
+		if used(cl) != 0 {
 			t.Fatalf("a slow body holds a %s slot", cl.name)
 		}
 	}

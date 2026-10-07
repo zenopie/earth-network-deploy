@@ -25,12 +25,14 @@ package filter
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -114,20 +116,33 @@ func (h *rpcHandler) serveURI(w http.ResponseWriter, r *http.Request) {
 		rpcRefuse(w, nil, http.StatusForbidden, err.Error())
 		return
 	}
-	h.up.forward(w, r, cl, http.MethodGet, "/"+name+uriQuery(route, call), nil, clientHeaders(r), rpcFwdOpts(name))
+	h.up.forward(w, r, cl, http.MethodGet, "/"+name+uriQuery(route, call), nil, clientHeaders(r), rpcFwdOpts(call))
 }
 
 // rpcFwdOpts: genesis_chunked is immutable for the chain's life (a relaunch
 // purges Cloudflare's cache, RELAUNCH.md), ~1.75 MB a call: cacheable. The
-// calls whose answers are sized by chain data get a byte ceiling.
-func rpcFwdOpts(method string) fwdOpts {
-	switch method {
+// calls whose answers are sized by chain data get a byte ceiling, and the
+// ones that name a fixed answer (a tx by hash, a given height's results) a
+// shedding key (shed.go): the hash or height, nothing else.
+func rpcFwdOpts(call rpcCall) fwdOpts {
+	switch call.method {
 	case "genesis_chunked":
 		return fwdOpts{cache: "public, max-age=3600, s-maxage=86400"}
 	case "block_results":
-		return fwdOpts{maxResp: maxRespBlockResults}
+		o := fwdOpts{maxResp: maxRespBlockResults}
+		if h := call.args["height"]; h.set && h.i > 0 {
+			o.shed = "block_results/" + strconv.FormatInt(h.i, 10)
+		}
+		return o
 	case "tx":
-		return fwdOpts{maxResp: maxRespTx}
+		o := fwdOpts{maxResp: maxRespTx}
+		if h := call.args["hash"].b; len(h) == 32 {
+			o.shed = "rpc-tx/" + hex.EncodeToString(h)
+			if call.args["prove"].t {
+				o.shed += "/prove"
+			}
+		}
+		return o
 	case "block":
 		return fwdOpts{maxResp: maxRespBlock}
 	}
@@ -211,7 +226,7 @@ func (h *rpcHandler) serveJSONRPC(w http.ResponseWriter, r *http.Request) {
 	}
 	hdr := clientHeaders(r)
 	hdr.Set("Content-Type", "application/json")
-	h.up.forward(w, r, cl, http.MethodPost, "/", jsonrpcBody(id, call), hdr, rpcFwdOpts(call.method))
+	h.up.forward(w, r, cl, http.MethodPost, "/", jsonrpcBody(id, call), hdr, rpcFwdOpts(call))
 }
 
 // parseJSONRPC is makeJSONRPCHandler's decoding of one body. The id comes

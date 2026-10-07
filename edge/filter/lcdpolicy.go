@@ -16,6 +16,7 @@ import (
 	"errors"
 	"net/url"
 	"regexp"
+	"strings"
 )
 
 type lcdSpec struct {
@@ -26,7 +27,8 @@ type lcdSpec struct {
 	params  map[string]string
 	class   string // light, bulk, txhash, query, search, broadcast, simulate (default query)
 	body    []string
-	maxResp int64 // answer byte ceiling for public requests (0: none; forward.go)
+	maxResp int64  // answer byte ceiling for public requests (0: none; forward.go)
+	shed    string // shedding key prefix (shed.go); the pattern must end in {hash}
 }
 
 var (
@@ -47,8 +49,9 @@ var lcdSpecs = []lcdSpec{
 		// cosmpy simulates with the legacy JSON `tx`; the wallets send tx_bytes.
 		body: []string{"tx_bytes", "txBytes", "tx"}},
 	// Commit polls and the wallets' activity: a point lookup in the tx
-	// index, its answer bounded by the per-tx result cap (txhash, limit.go).
-	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs/{hash}", class: "txhash", maxResp: maxRespTxLCD},
+	// index, its answer sized by what the tx stored (txhash, limit.go; the
+	// ceiling, forward.go), and shed by hash once over it (shed.go).
+	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs/{hash}", class: "txhash", maxResp: maxRespTxLCD, shed: "lcd-tx"},
 	// The explorer's search: one block's txs (lcd.go checkSearch).
 	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs", class: "search", maxResp: maxRespSearch, params: map[string]string{
 		"query":    searchQuery,
@@ -199,6 +202,12 @@ func buildLCDRoutes() []*lcdRoute {
 			panic("lcdpolicy: class " + s.class)
 		}
 		rt.grpc, rt.page, rt.maxResp = s.grpc, s.page, s.maxResp
+		if s.shed != "" {
+			if s.maxResp == 0 || !strings.HasSuffix(s.pattern, "/{hash}") {
+				panic("lcdpolicy: shed needs a ceiling and a trailing {hash}: " + s.pattern)
+			}
+			rt.shed = s.shed
+		}
 		out = append(out, rt)
 	}
 	return out
