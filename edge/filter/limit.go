@@ -111,20 +111,27 @@ const holdCeiling = 3 * time.Minute
 // (round-6 R6-E-3), and each keeps a backend slot (gas-check's store reads,
 // the backend's own broadcasts).
 //
-// The bulk class holds the calls whose answer size is set by what was put
-// on chain rather than by the request: block_results, a tx by hash (RPC tx,
-// LCD txs/{hash}). A wasm tx can make its stored result tens of MB (wasmd
-// charges ~1 gas per byte of event and data), and the node builds each such
-// answer in memory several times over (round-6 R6-E-1 measured ~6x), so
-// these are few at a time, and each answer also has a byte ceiling
-// (forward.go, fwdOpts.maxResp). Neither stops the node's build of one
-// answer: the real fix is the chain's per-tx result byte cap, which bounds
-// what any of these calls can be asked to build. The edge bounds only how
-// many are built at once and how much of each it passes on.
+// Two classes hold the calls whose answer size is set by what was put on
+// chain rather than by the request. The node builds each such answer in
+// memory several times over (round-6 R6-E-1 measured ~6x), and each also
+// has a byte ceiling (forward.go, fwdOpts.maxResp). Neither stops the
+// node's build of one answer: what bounds the build is the chain's per-tx
+// result cap (app/result_cap.go: 1 MiB per tx, about 10 MB per block).
+//
+//   - bulk: block_results. One block's results, up to ~10 MB of proto for
+//     a block built to be large: few at a time, and the backend (the
+//     indexer) keeps a slot.
+//   - txhash: one tx by hash (RPC tx, LCD txs/{hash}). Its answer is
+//     bounded by the per-tx cap (a few MiB of JSON at worst, forward.go),
+//     so it does not need block_results' tiny class, and it is what every
+//     wallet's commit poll and activity refresh calls. It has its own
+//     slots so that anonymous block_results reads, however heavy, cannot
+//     make a committed tx look unconfirmed (round-7 R7-D-1).
 type Classes struct {
 	light     *class // point reads that do not touch the app: status, a block, a commit
 	results   *class // block ranges (headers), genesis_chunked: larger bodies of fixed size
-	bulk      *class // block_results, a tx by hash: answers sized by chain data (above)
+	bulk      *class // block_results: one block's results, sized by chain data (above)
+	txhash    *class // RPC tx, LCD txs/{hash}: one tx, bounded by the per-tx result cap
 	query     *class // LCD gRPC GETs: run outside the ABCI mutex, metered by query gas
 	abciQuery *class // RPC abci_query, abci_info: under the ABCI mutex
 	broadcast *class // RPC broadcast_tx_sync/async, LCD POST txs (CheckTx): under the ABCI mutex
@@ -141,10 +148,19 @@ const abciMutexHolders = 4
 
 func DefaultClasses() *Classes {
 	w := 2 * time.Second
+	// txhash: a commit poll is a point read in the tx index, milliseconds
+	// for an ordinary tx, so 8 slots serve hundreds of polls a second (a
+	// phone polls at most 20 times per tx, and the activity refresh a few
+	// hashes at a time). An attacker who wants them busy has to ask for txs
+	// near the 1 MiB result cap, each paid for and each a bounded build;
+	// block_results no longer competes for them. Every slot together is
+	// 64, the transport's MaxConnsPerHost (TestSlotsFitConnections); light
+	// gave up the slots txhash needed (its calls do not touch the app).
 	return &Classes{
-		light:     newClass("light", 20, 3, w, 15*time.Second),
+		light:     newClass("light", 12, 3, w, 15*time.Second),
 		results:   newClass("results", 8, 4, w, 30*time.Second),
-		bulk:      newClass("bulk", 3, 1, w, 30*time.Second),
+		bulk:      newClass("bulk", 2, 1, w, 30*time.Second),
+		txhash:    newClass("txhash", 8, 2, w, 20*time.Second),
 		query:     newClass("query", 12, 4, w, 20*time.Second),
 		abciQuery: newClass("abci-query", 1, 1, 4*time.Second, 20*time.Second),
 		broadcast: newClass("broadcast", 1, 1, 4*time.Second, 20*time.Second),
@@ -155,7 +171,7 @@ func DefaultClasses() *Classes {
 
 // all lists every class (tests, and the ABCI holder count).
 func (c *Classes) all() []*class {
-	return []*class{c.light, c.results, c.bulk, c.query, c.abciQuery, c.broadcast, c.simulate, c.search}
+	return []*class{c.light, c.results, c.bulk, c.txhash, c.query, c.abciQuery, c.broadcast, c.simulate, c.search}
 }
 
 // isABCI: the class's requests take the node's ABCI mutex.

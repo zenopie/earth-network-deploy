@@ -24,7 +24,7 @@ type lcdSpec struct {
 	grpc    string // full gRPC method; "" for the tx service (never over abci_query)
 	page    bool   // the request has a PageRequest: pagination.* served, limit injected
 	params  map[string]string
-	class   string // light, bulk, query, search, broadcast, simulate (default query)
+	class   string // light, bulk, txhash, query, search, broadcast, simulate (default query)
 	body    []string
 	maxResp int64 // answer byte ceiling for public requests (0: none; forward.go)
 }
@@ -47,8 +47,8 @@ var lcdSpecs = []lcdSpec{
 		// cosmpy simulates with the legacy JSON `tx`; the wallets send tx_bytes.
 		body: []string{"tx_bytes", "txBytes", "tx"}},
 	// Commit polls and the wallets' activity: a point lookup in the tx
-	// index, but the answer is as large as the tx's stored result (bulk).
-	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs/{hash}", class: "bulk", maxResp: maxRespTxLCD},
+	// index, its answer bounded by the per-tx result cap (txhash, limit.go).
+	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs/{hash}", class: "txhash", maxResp: maxRespTxLCD},
 	// The explorer's search: one block's txs (lcd.go checkSearch).
 	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs", class: "search", maxResp: maxRespSearch, params: map[string]string{
 		"query":    searchQuery,
@@ -187,6 +187,8 @@ func buildLCDRoutes() []*lcdRoute {
 			rt.class = func(c *Classes) *class { return c.search }
 		case "bulk":
 			rt.class = func(c *Classes) *class { return c.bulk }
+		case "txhash":
+			rt.class = func(c *Classes) *class { return c.txhash }
 		case "broadcast":
 			rt.class = func(c *Classes) *class { return c.broadcast }
 		case "simulate":

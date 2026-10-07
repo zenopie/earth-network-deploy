@@ -75,7 +75,7 @@ func checkRPC(c *Classes, call rpcCall) (*class, error) {
 		if len(a["hash"].b) != 32 {
 			return nil, fmt.Errorf("%w: hash must be 32 bytes", errRefused)
 		}
-		return c.bulk, nil
+		return c.txhash, nil
 	case "broadcast_tx_sync", "broadcast_tx_async":
 		if len(a["tx"].b) == 0 {
 			return nil, fmt.Errorf("%w: empty tx", errRefused)

@@ -276,8 +276,11 @@ func assertRPCCost(t *testing.T, c *Classes, call rpcCall, cl *class, bodyLen in
 	if strings.HasPrefix(call.method, "broadcast_") != (cl == c.broadcast) {
 		t.Fatalf("%s in class %s: broadcasts, and only those, are in the broadcast class", call.method, cl.name)
 	}
-	if (call.method == "block_results" || call.method == "tx") != (cl == c.bulk) {
-		t.Fatalf("%s in class %s: answers sized by chain data are in the bulk class", call.method, cl.name)
+	if (call.method == "block_results") != (cl == c.bulk) {
+		t.Fatalf("%s in class %s: block_results, and only it, is in the bulk class", call.method, cl.name)
+	}
+	if (call.method == "tx") != (cl == c.txhash) {
+		t.Fatalf("%s in class %s: a tx by hash, and only it, is in the txhash class", call.method, cl.name)
 	}
 	if bodyLen > 2*maxBody {
 		t.Fatalf("forwarded a %d-byte body", bodyLen)

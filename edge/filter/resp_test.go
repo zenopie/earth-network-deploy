@@ -82,11 +82,11 @@ func TestAnswerCeiling(t *testing.T) {
 		}
 
 		deadline := time.Now().Add(2 * time.Second)
-		for len(c.bulk.sem)+len(c.bulk.reserved) != 0 && time.Now().Before(deadline) {
+		for len(c.txhash.sem)+len(c.txhash.reserved) != 0 && time.Now().Before(deadline) {
 			time.Sleep(5 * time.Millisecond)
 		}
-		if k := len(c.bulk.sem) + len(c.bulk.reserved); k != 0 {
-			t.Fatalf("%d bulk slots still held", k)
+		if k := len(c.txhash.sem) + len(c.txhash.reserved); k != 0 {
+			t.Fatalf("%d txhash slots still held", k)
 		}
 	}
 	// Under the ceiling, an answer passes whole.
@@ -104,17 +104,21 @@ func TestAnswerCeiling(t *testing.T) {
 	}
 }
 
-// R6-E-1: the calls whose answers are sized by chain data share one small
-// class, RPC and LCD alike, and each has a ceiling.
-func TestBulkClass(t *testing.T) {
+// R6-E-1, R7-D-1: block_results is in the small bulk class; a tx by hash,
+// RPC and LCD alike, is in its own txhash class, so a block_results flood
+// cannot starve wallet commit polls. Each has a ceiling.
+func TestChainSizedClasses(t *testing.T) {
 	c := DefaultClasses()
-	rpcCases := map[string]rpcCall{
-		"block_results": {method: "block_results", args: map[string]ArgVal{}},
-		"tx":            {method: "tx", args: map[string]ArgVal{"hash": {set: true, b: make([]byte, 32)}}},
+	rpcCases := map[string]struct {
+		call rpcCall
+		want *class
+	}{
+		"block_results": {rpcCall{method: "block_results", args: map[string]ArgVal{}}, c.bulk},
+		"tx":            {rpcCall{method: "tx", args: map[string]ArgVal{"hash": {set: true, b: make([]byte, 32)}}}, c.txhash},
 	}
-	for name, call := range rpcCases {
-		cl, err := checkRPC(c, call)
-		if err != nil || cl != c.bulk {
+	for name, tc := range rpcCases {
+		cl, err := checkRPC(c, tc.call)
+		if err != nil || cl != tc.want {
 			t.Errorf("%s: class %v, %v", name, cl, err)
 		}
 		if rpcFwdOpts(name).maxResp == 0 {
@@ -127,7 +131,7 @@ func TestBulkClass(t *testing.T) {
 	for _, rt := range lcdRoutes {
 		switch rt.pattern {
 		case "/cosmos/tx/v1beta1/txs/{hash}":
-			if rt.class(c) != c.bulk || rt.maxResp == 0 {
+			if rt.class(c) != c.txhash || rt.maxResp == 0 {
 				t.Errorf("%s: class %s, ceiling %d", rt.pattern, rt.class(c).name, rt.maxResp)
 			}
 		case "/cosmos/tx/v1beta1/txs", "/cosmos/base/tendermint/v1beta1/blocks/{uint}", "/cosmos/base/tendermint/v1beta1/blocks/latest":
@@ -135,9 +139,28 @@ func TestBulkClass(t *testing.T) {
 				t.Errorf("%s: no answer ceiling", rt.pattern)
 			}
 		}
+		if rt.class(c) == c.bulk {
+			t.Errorf("%s: no LCD route shares block_results' class", rt.pattern)
+		}
 	}
 	if n := cap(c.bulk.sem) + cap(c.bulk.reserved); n > 4 {
 		t.Errorf("bulk class holds %d", n)
+	}
+	if cap(c.txhash.sem) < 8 || cap(c.txhash.reserved) < 1 {
+		t.Errorf("txhash class %d+%d: too small for wallet commit polls", cap(c.txhash.sem), cap(c.txhash.reserved))
+	}
+	// A tx by hash still gets an answer while every bulk slot is busy.
+	for range cap(c.bulk.sem) {
+		c.bulk.sem <- struct{}{}
+	}
+	if rel := c.txhash.acquire(t.Context(), false); rel == nil {
+		t.Fatal("txhash slot refused while bulk is full")
+	} else {
+		rel()
+	}
+	// The ceilings stay under what the per-tx cap allows (forward.go).
+	if maxRespTx < 8<<20 || maxRespTxLCD < 12<<20 {
+		t.Errorf("tx ceilings %d/%d under the per-tx cap's worst case", maxRespTx, maxRespTxLCD)
 	}
 }
 
@@ -162,14 +185,14 @@ func TestSlowReaderFreesSlot(t *testing.T) {
 	fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: x\r\n\r\n", txHashQ)
 	// Never read. The slot is taken, then freed when a write stalls.
 	deadline := time.Now().Add(time.Second)
-	for len(c.bulk.sem) == 0 && time.Now().Before(deadline) {
+	for len(c.txhash.sem) == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	start := time.Now()
-	for len(c.bulk.sem) != 0 && time.Since(start) < 3*time.Second {
+	for len(c.txhash.sem) != 0 && time.Since(start) < 3*time.Second {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if len(c.bulk.sem) != 0 {
+	if len(c.txhash.sem) != 0 {
 		t.Fatalf("a client that stopped reading still holds its slot after %v", time.Since(start))
 	}
 }

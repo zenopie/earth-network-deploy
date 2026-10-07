@@ -70,12 +70,15 @@ type fwdOpts struct {
 // about 10 MB of results per block at worst), and a default node admitting
 // txs up to 1 MiB (mempool max_tx_bytes). In JSON, bytes are base64 (4/3)
 // and an event attribute costs up to ~4.6x its proto size (one-byte keys and
-// values). Each ceiling sits above the largest answer those allow:
+// values), ~6x when its characters are ones encoding/json escapes as
+// \u00XX (<, >, &, control bytes, invalid UTF-8). Each ceiling for a single
+// tx or block sits above the largest answer those allow:
 const (
-	// RPC tx: a 1 MiB tx (1.33 MiB) and a 1 MiB result (~4.6 MiB): ~6 MiB.
+	// RPC tx: a 1 MiB tx (1.33 MiB) and a 1 MiB result (~4.6 MiB, ~6 MiB
+	// all escaped): ~6-7.4 MiB.
 	maxRespTx = 8 << 20
 	// LCD txs/{hash}: the tx twice (tx and tx_response.tx) and the
-	// result: ~7.5 MiB.
+	// result: ~7.5 MiB, under 12 MiB with an all-escaped result too.
 	maxRespTxLCD = 12 << 20
 	// One block's results: ~10 MB of results at worst, which only a block
 	// built to be large reaches; past this a public read of it is cut.

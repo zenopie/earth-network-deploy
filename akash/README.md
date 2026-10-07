@@ -147,9 +147,9 @@ The filter:
   broadcasts, `abci_info`) is in one of two classes, reads and broadcasts, 1 public
   slot and 1 backend slot each: at most 4 holders, and a read flood cannot starve
   broadcasts;
-- **caps answers sized by chain data** (`block_results`, a tx by hash): a small
-  class and a byte ceiling per call (below); the chain's per-tx result cap is the
-  real bound;
+- **caps answers sized by chain data** (`block_results`, a tx by hash): a class
+  each and a byte ceiling per call (below), `block_results` small and separate from
+  the wallets' commit polls; the chain's per-tx result cap is the real bound;
 - bounds bodies (1 MiB each; read before any slot is taken, under a deadline of
   2 s + 128 KiB/s of their size; charged, copies included, to a 48 MiB byte budget,
   16 MiB for the backend, until answered; reserved in chunks that grow with what
@@ -228,17 +228,22 @@ node's answer has been read to its end.
 
 | Class | What | Public | Backend | Waits |
 | --- | --- | --- | --- | --- |
-| light | status, block, commit, validators, consensus_params, LCD blocks, preflights | 20 | +3 | 2 s |
+| light | status, block, commit, validators, consensus_params, LCD blocks, preflights | 12 | +3 | 2 s |
 | results | blockchain, genesis_chunked | 8 | +4 | 2 s |
-| bulk | answers sized by chain data: `block_results`, RPC `tx`, LCD `txs/{hash}` | 3 | +1 | 2 s |
+| bulk | `block_results` (one block's results, up to ~10 MB for a block built to be large) | 2 | +1 | 2 s |
+| txhash | a tx by hash: RPC `tx`, LCD `txs/{hash}` (wallet commit polls, activity refresh) | 8 | +2 | 2 s |
 | query | LCD gRPC GETs (outside the ABCI mutex, metered by query gas) | 12 | +4 | 2 s |
 | abci-query | RPC `abci_query` (gRPC paths and `/store/` reads), `abci_info`: ABCI mutex | 1 | +1 | 4 s |
 | broadcast | `broadcast_tx_sync`/`_async`, LCD POST txs (CheckTx): ABCI mutex | 1 | +1 | 4 s |
 | simulate | LCD simulate (CPU outside the mutex, bounded by `simulation_gas_limit`) | 2 | +1 | 4 s |
 | search | LCD tx search, `tx.height=N` only | 1 | 0 | 2 s |
 
-Together at most 63 calls at the node, under its 100 RPC and 200 API connection caps
-and the edge's 64 connections per upstream. At most 4 of them hold or queue on the
+Together at most 64 calls at the node, under its 100 RPC and 200 API connection caps
+and within the edge's 64 connections per upstream (a test holds the classes to it).
+A tx by hash has its own class (round-7 R7-D-1): its answer is bounded by the chain's
+1 MiB per-tx result cap, so it does not need `block_results`' tiny class, and a flood
+of heavy `block_results` reads cannot make a committed tx look unconfirmed to the
+wallets. At most 4 of them hold or queue on the
 ABCI mutex, so a consensus step waits behind at most four bounded calls; reads and
 broadcasts have separate slots, so a flood of `abci_query` cannot refuse wallet
 broadcasts (round-6 R6-E-3).
@@ -254,7 +259,7 @@ node admitting txs of up to 1 MiB. Each ceiling is above the largest answer thos
 allow (`edge/filter/forward.go` has the arithmetic; `edge/conformance` checks it
 against the pinned chain's genesis), except `block_results` of a block built to be
 large, whose public read is cut. The `bulk` class bounds how many such builds run
-at once.
+at once, and `txhash` how many single-tx builds (each bounded by the per-tx cap).
 
 A changed allowlist or cap is a change to `edge/filter/`
 here, with a case in its tests, then `bin/build-edge.sh --pin`; it goes onto the lease
