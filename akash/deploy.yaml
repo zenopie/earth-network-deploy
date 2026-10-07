@@ -411,7 +411,7 @@ services:
     # PLACEHOLDER (all zeros): bin/build-edge.sh --pin builds, pushes and
     # writes the real digest here (RELAUNCH.md 1.4); build-sdl.py refuses the
     # placeholder. Never a tag, and not touched by the node's digest pin.
-    image: ghcr.io/zenopie/earth-network-edge@sha256:38ba4c1ff8c982905af2988f400755f3bc468a7530e7c2608ae0b4289d22c607
+    image: ghcr.io/zenopie/earth-network-edge@sha256:69814afe6d382036e65e30644bb1fcde2c0773243408dfed2919b448be2e76fc
     # No command: the image's ENTRYPOINT (/earth-edge) runs as its USER,
     # uid 65532. Not root: it parses what strangers send, and earth-edge
     # refuses to start as root. build-sdl.py refuses a command or args here.
