@@ -66,6 +66,9 @@ var lcdSpecs = []lcdSpec{
 	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/blocks/{uint}", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetBlockByHeight", class: "light", maxResp: maxRespBlockLCD},
 	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/node_info", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetNodeInfo", class: "light"},
 	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/syncing", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetSyncing", class: "light"},
+	// cosmpy (the backend's gas grants) reads the block gas limit here after
+	// every simulate, to cap the gas it asks for: a fixed-size point read.
+	{method: "GET", pattern: "/cosmos/consensus/v1/params", grpc: "/cosmos.consensus.v1.Query/Params", class: "light"},
 	{method: "GET", pattern: "/cosmos/base/tendermint/v1beta1/validatorsets/latest", grpc: "/cosmos.base.tendermint.v1beta1.Service/GetLatestValidatorSet", page: true, class: "light"},
 
 	// --- auth, bank -----------------------------------------------------
