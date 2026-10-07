@@ -1,0 +1,85 @@
+# Build and push the deployment's own images to ghcr, the way the chain repo's
+# docker-build workflow publishes the chain image: no Docker on anyone's laptop.
+#
+#   edge   earth-edge (edge/Dockerfile), after the filter's tests and conformance
+#          against the chain commit edge/conformance/chain.pin names
+#   node   the validator's node image (node/Dockerfile) on the chain image
+#          node/base.pin names, checked against akash/genesis.sha256
+#
+# Run it by hand (Actions → images → Run workflow) on the commit to deploy.
+# Each image is tagged with that commit's 12-hex hash. Then, locally:
+#
+#   bin/build-edge.sh --pin-built <rev>
+#   bin/build-node.sh --pin-built <rev>
+#
+# which resolve the tag anonymously (as the Akash provider will), re-run the
+# image checks, and write the digests into akash/deploy.yaml for you to commit.
+# The workflow never writes to the repository.
+#
+# The first push of a package creates it private: make
+# zenopie/earth-network-edge and zenopie/earth-network-node public once
+# (Package settings → Change visibility), then re-run; the build scripts'
+# anonymous-pull check fails until then.
+name: images
+on:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: "Which images to build"
+        type: choice
+        options: [both, edge, node]
+        default: both
+permissions:
+  contents: read
+  packages: write
+jobs:
+  edge:
+    if: inputs.images == 'both' || inputs.images == 'edge'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: edge/go.mod
+          cache: false
+      - name: conformance against the pinned chain
+        env:
+          CI: "1"
+        run: |
+          edge/conformance/fetch-chain.sh
+          (cd edge/conformance && go test -mod=readonly ./...)
+      - uses: docker/setup-buildx-action@v3
+      - name: log in to ghcr
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: build, test and push
+        run: set -o pipefail; bin/build-edge.sh | tee /tmp/edge.out
+      - name: summary
+        if: always()
+        run: |
+          rev=$(git rev-parse --short=12 HEAD)
+          {
+            echo "### earth-edge"
+            echo "commit tag: \`$rev\`"
+            echo '```'; cat /tmp/edge.out 2>/dev/null || true; echo '```'
+            echo "Pin locally: \`bin/build-edge.sh --pin-built $rev\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+  node:
+    if: inputs.images == 'both' || inputs.images == 'node'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: log in to ghcr
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: build and push
+        run: set -o pipefail; bin/build-node.sh | tee /tmp/node.out
+      - name: summary
+        if: always()
+        run: |
+          rev=$(git rev-parse --short=12 HEAD)
+          {
+            echo "### node"
+            echo "commit tag: \`$rev\`"
+            echo '```'; cat /tmp/node.out 2>/dev/null || true; echo '```'
+            echo "Pin locally: \`bin/build-node.sh --pin-built $rev\`"
+          } >> "$GITHUB_STEP_SUMMARY"

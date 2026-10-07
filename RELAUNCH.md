@@ -72,6 +72,12 @@ reads `block_results` from it from height 1. There is no separate archive lease.
      all green, `CI=1` so nothing skips. A conformance failure is the filter's
      allowlist drifting from the chain's routes or versions: fix `edge/` in the same
      commit as the pin.
+   - **Without local Docker** (the usual path): push the commit, run the
+     **images** workflow (GitHub → Actions → images → Run workflow, `edge` or
+     `both`), which runs conformance and builds and pushes the image tagged with the
+     commit, then locally `bin/build-edge.sh --pin-built <12-hex commit>` to resolve
+     it anonymously and pin it; commit that line. The same applies to the node image
+     below with `bin/build-node.sh --pin-built`. With local Docker instead:
    - `docker login ghcr.io` (a token with `write:packages`), then
      `bin/build-edge.sh --pin`: it builds `edge/Dockerfile` for linux/amd64 from the
      committed `edge/` (the filter's tests run in the build), pushes
@@ -103,6 +109,8 @@ reads `block_results` from it from height 1. There is no separate archive lease.
        node/entrypoint_test.sh                    # all pass
        bin/build-node.sh --base <launch tag>      # writes node/base.pin; commit it
        bin/build-node.sh --pin                    # builds, pushes, pins node + relayer
+       # or, without local Docker: push the base.pin commit, run the "images"
+       # workflow (node), then bin/build-node.sh --pin-built <12-hex commit>
 
    `--pin` writes `ghcr.io/zenopie/earth-network-node@sha256:<digest>  # FROM <base>`
    on both image lines; commit them, and make the `earth-network-node` package

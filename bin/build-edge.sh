@@ -6,6 +6,10 @@
 #   bin/build-edge.sh            build, test (in the Dockerfile), push, print
 #   bin/build-edge.sh --pin      ... and write the digest into akash/deploy.yaml
 #   bin/build-edge.sh --check    build and test only; push nothing
+#   bin/build-edge.sh --pin-built <rev>
+#                                build nothing: pin the image CI's "images"
+#                                workflow pushed for commit <rev> (its tag),
+#                                after the same anonymous-pull check
 #
 # Needs docker with buildx, and for a push `docker login ghcr.io` with a token
 # that has write:packages. The package must be public (the Akash provider pulls
@@ -19,16 +23,28 @@ cd "$(dirname "$0")/.."
 
 REPO="${EDGE_IMAGE_REPO:-zenopie/earth-network-edge}"
 SDL=akash/deploy.yaml
-pin=0 check=0
-for a in "$@"; do
-  case "$a" in
-    --pin) pin=1 ;;
-    --check) check=1 ;;
-    *) echo "usage: build-edge.sh [--pin | --check]" >&2; exit 2 ;;
+pin=0 check=0 built=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pin) pin=1; shift ;;
+    --check) check=1; shift ;;
+    --pin-built) built="${2:?--pin-built needs the 12-hex commit tag CI pushed}"; pin=1; shift 2 ;;
+    *) echo "usage: build-edge.sh [--pin | --check | --pin-built <rev>]" >&2; exit 2 ;;
   esac
 done
 [ $((pin + check)) -le 1 ] || { echo "--pin and --check exclude each other" >&2; exit 2; }
 
+if [ -n "$built" ]; then
+  [[ "$built" =~ ^[0-9a-f]{12}$ ]] || { echo "--pin-built takes the 12-hex commit tag" >&2; exit 2; }
+  [ "$check" = 0 ] || { echo "--pin-built and --check exclude each other" >&2; exit 2; }
+  git cat-file -e "${built}^{commit}" 2>/dev/null || { echo "${built} is not a commit here" >&2; exit 1; }
+  [ -z "$(git diff --name-only "$built" HEAD -- edge)" ] \
+    || { echo "edge/ changed since ${built}: that image is not this checkout's filter" >&2; exit 1; }
+  [ -z "$(git status --porcelain -- edge)" ] || { echo "edge/ has uncommitted changes" >&2; exit 1; }
+  remote=$(IMAGE_REPO="$REPO" bin/digest.sh "$built") || {
+    echo "${REPO}:${built} cannot be read anonymously: not pushed, or the package is not public" >&2; exit 1; }
+  digest="${remote##*@}"
+else
 if [ -n "$(git status --porcelain -- edge)" ]; then
   echo "edge/ has uncommitted changes: commit them first, so the digest names a commit" >&2
   exit 1
@@ -57,6 +73,7 @@ remote=$(IMAGE_REPO="$REPO" bin/digest.sh "$rev") || {
 [ "$remote" = "ghcr.io/${REPO}@${digest}" ] || {
   echo "registry has ${remote} for ${rev}, buildx pushed ${digest}" >&2; exit 1; }
 
+fi
 pinned="ghcr.io/${REPO}@${digest}"
 echo "$pinned"
 

@@ -11,6 +11,10 @@
 #   bin/build-node.sh --pin                ... and write the digest into
 #                                          akash/deploy.yaml (node and relayer)
 #   bin/build-node.sh --check              build only; push nothing
+#   bin/build-node.sh --pin-built <rev>    build nothing: pin the image CI's
+#                                          "images" workflow pushed for commit
+#                                          <rev>, after the same anonymous-pull
+#                                          and label/layer checks
 #
 # Needs docker with buildx, and for a push `docker login ghcr.io` with a token
 # that has write:packages. The package must be public (the Akash provider pulls
@@ -35,13 +39,14 @@ REPO="${NODE_IMAGE_REPO:-zenopie/earth-network-node}"
 CHAIN_REPO="zenopie/earth-network-chain"
 SDL=akash/deploy.yaml
 PIN=node/base.pin
-pin=0 check=0 base_tag=""
+pin=0 check=0 base_tag="" built=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --pin) pin=1; shift ;;
+    --pin-built) built="${2:?--pin-built needs the 12-hex commit tag CI pushed}"; pin=1; shift 2 ;;
     --check) check=1; shift ;;
     --base) base_tag="${2:?--base needs the chain release tag}"; shift 2 ;;
-    *) echo "usage: build-node.sh [--base <chain tag> | --pin | --check]" >&2; exit 2 ;;
+    *) echo "usage: build-node.sh [--base <chain tag> | --pin | --check | --pin-built <rev>]" >&2; exit 2 ;;
   esac
 done
 [ $((pin + check)) -le 1 ] || { echo "--pin and --check exclude each other" >&2; exit 2; }
@@ -65,6 +70,17 @@ base=$(tr -d '[:space:]' < "$PIN")
 gsha=$(awk 'NR==1{print $1}' akash/genesis.sha256)
 [[ "$gsha" =~ ^[0-9a-f]{64}$ ]] || { echo "akash/genesis.sha256 has no sha256" >&2; exit 1; }
 
+if [ -n "$built" ]; then
+  [[ "$built" =~ ^[0-9a-f]{12}$ ]] || { echo "--pin-built takes the 12-hex commit tag" >&2; exit 2; }
+  [ "$check" = 0 ] || { echo "--pin-built and --check exclude each other" >&2; exit 2; }
+  git cat-file -e "${built}^{commit}" 2>/dev/null || { echo "${built} is not a commit here" >&2; exit 1; }
+  [ -z "$(git diff --name-only "$built" HEAD -- node akash/genesis.sha256)" ] \
+    || { echo "node/ or the genesis pin changed since ${built}: that image is not this checkout's" >&2; exit 1; }
+  [ -z "$(git status --porcelain -- node akash/genesis.sha256)" ] || { echo "node/ or the genesis pin has uncommitted changes" >&2; exit 1; }
+  remote=$(IMAGE_REPO="$REPO" bin/digest.sh "$built") || {
+    echo "${REPO}:${built} cannot be read anonymously: not pushed, or the package is not public" >&2; exit 1; }
+  digest="${remote##*@}"
+else
 if [ -n "$(git status --porcelain -- node akash/genesis.sha256)" ]; then
   echo "node/ or akash/genesis.sha256 has uncommitted changes: commit them first, so the digest names a commit" >&2
   exit 1
@@ -94,6 +110,7 @@ remote=$(IMAGE_REPO="$REPO" bin/digest.sh "$rev") || {
 [ "$remote" = "ghcr.io/${REPO}@${digest}" ] || {
   echo "registry has ${remote} for ${rev}, buildx pushed ${digest}" >&2; exit 1; }
 
+fi
 pinned="ghcr.io/${REPO}@${digest}"
 # Read the labels back from the registry, as a deploy will.
 NODE_IMAGE_REPO="$REPO" python3 bin/check-node-image.py "$pinned" "$base" "$gsha" \
