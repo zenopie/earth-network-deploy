@@ -11,3 +11,6 @@
 # property of this repository.
 .claude/settings.local.json
 __pycache__/
+
+# edge/conformance/fetch-chain.sh: the pinned chain's go.mod and protos.
+edge/conformance/.chain/
