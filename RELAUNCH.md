@@ -45,7 +45,8 @@ reads `block_results` from it from height 1. There is no separate archive lease.
      app-signing fingerprint for `/ref/<handle>` App Links.
    - The verifying keys in the genesis must be the ones these builds prove against.
 3. **Chain release candidate**: everything merged, `make genesis-check` and the test
-   suite green. The tag is cut at the ceremony (section 2), because the genesis is
+   suite green, the edge filter's too (`docker/edge`, and its `conformance` module;
+   the image carries `earth-edge`, which the SDL's `edge` service runs). The tag is cut at the ceremony (section 2), because the genesis is
    baked into the image.
 4. **Backend release** with `EARTHD_VERSION` / `EARTHD_SHA256` (backend `Dockerfile`)
    bumped to the launch tag. `/gas/register` runs `earthd gas-check registration`,
@@ -216,22 +217,27 @@ chain tunnel (one token, one live connector).
      /proc/cpuinfo` is not 0 (if the shell answers, which needs a running container);
    - no `REQUIRE_NO_CONSENSUS_KEY` refusal (the validator does not set it);
    - the 26656 host:port from the lease status. Record it for `EXTERNAL_ADDRESS` and
-     the docs' P2P address.
-4. **Cloudflare rules for `rpc.*` and `lcd.*`** (akash/README.md, "Public RPC and LCD
-   limits"), in place before `genesis_time`: rule 0 (Skip for the backend's
-   `CHAIN_EDGE_TOKEN` header; generate the token now and put it in the backend's
-   `.env`, section 4.3 needs it), rule 1 (the RPC GET allowlist: no POST, no
-   `/websocket`, decoded `/abci_query` checks), rule 2 (LCD: no form POSTs, no
-   method override, POST only to broadcast and simulate), and the rate limits in the
-   variant your plan accepts (search on the exact path `/cosmos/tx/v1beta1/txs`, GET;
-   by-hash lookups never). Run that section's outside checks after the node is up.
-   The node-side limits are already in the SDL (`limits:` line of the dry run,
-   `rpc_subs=0`).
+     the docs' P2P address;
+   - `bin/lease-logs.py --service edge`: `earth-edge: rpc :26657 -> http://node:26657,
+     lcd :1317 -> http://node:1317, … LCD routes, … gRPC paths over abci_query`, and
+     no `refusing to run as root`. The filter is up before the node: until
+     `genesis_time` it answers `502`.
+4. **Public Hostnames and Cloudflare rules for `rpc.*` and `lcd.*`** (akash/README.md,
+   "Public RPC and LCD"), in place before `genesis_time`. The hostnames point at the
+   filter: `rpc.* -> http://edge:26657`, `lcd.* -> http://edge:1317`, never `node:*`
+   (that serves the public unfiltered). Then rule 0 (Skip **rate limiting rules
+   only** for the backend's `CHAIN_EDGE_TOKEN` header; generate the token now and
+   put it in the backend's `.env`, section 4.3 needs it), rule 1 (block websocket
+   upgrades), and the two per-IP rate limits in the variant your plan accepts. The
+   allowlist itself is `edge`, in the SDL: nothing to configure. Run that section's
+   outside checks after the node is up; a `tx_search` that answers means a hostname
+   points at the node. The node-side limits are in the SDL too (`limits:` and
+   `edge:` lines of the dry run, `rpc_subs=0`).
 5. **Cloudflare no-logs settings** (NO_LOGS.md, "Cloudflare settings"): no Logpush
    job, Web Analytics and Network Error Logging off, no Zaraz or Workers, Browser
    Integrity Check and Security Level off for the API hostnames, WAF rules on Block,
    rule 0 not logging. The node and cloudflared log levels are in the SDL and checked
-   by `build-sdl.py`.
+   by `build-sdl.py`; `edge` logs no request at all.
 
 **Disk.** The node keeps everything (`pruning=nothing`, every block's results) on a
 200Gi volume that only grows, and Akash cannot grow a volume in place: a bigger disk
@@ -279,11 +285,15 @@ grant history.
 4. **`api.erth.network`**: one connector per tunnel. Close the old lease
    `1790918719150` as soon as the new one serves, or the two connectors split
    requests.
-5. **The backend passes Cloudflare by its token, not its address.** Nothing to do per
-   lease: rule 0 matches the `CHAIN_EDGE_TOKEN` header wherever the backend runs. If
-   the startup log says `CHAIN_EDGE_TOKEN is unset`, or grants fail with gas-check
-   unavailable (`403` from `rpc.erth.network`), the token in `.env` and in rule 0
-   differ.
+5. **The backend skips the per-IP rate limits by its token, not its address.**
+   Nothing to do per lease: rule 0 matches the `CHAIN_EDGE_TOKEN` header wherever the
+   backend runs, and skips only the rate limits; every call the backend makes is in
+   the filter's public allowlist anyway. If the startup log says
+   `CHAIN_EDGE_TOKEN is unset`, the backend works but its re-index and grant bursts
+   meet `429`s; if grants fail with gas-check unavailable and a `403 … refused by the
+   edge filter`, gas-check made a call the filter does not serve (a chain change to
+   what gas-check reads needs the filter's `subspaceRules`/`storeKeyModules` updated
+   in the same release).
 6. **Purge the circuit cache once.** Backends before this release served
    `/circuits/<variant>.json.gz` as `immutable` for a year, and all 17 circuits
    changed under those names, so a Cloudflare colo may still hold an old build.

@@ -36,6 +36,7 @@ tunnel.
 | --- | --- | --- |
 | Validator node | `EARTHD_LOG_LEVEL=*:info,rpc-server:error`. The node sees only the tunnel connector's address, never a client's, and does not log requests at info. `rpc-server` is held at error because at info it logs websocket remote addresses. | `bin/build-sdl.py` refuses `debug`/`trace` and requires `rpc-server:error` |
 | Validator and backend cloudflared | `--loglevel info`: connector state, plus one `ERR` line per request the origin failed to answer. Read from cloudflared 2026.9.3's source (`proxy/logger.go`, `proxy/proxy.go`): the line carries the time, `connIndex`, `cfRay`, `ingressRule`, `originService` and `error`. The error is cloudflared's wrapper text ("Unable to reach the origin service…", "Incoming request ended abruptly…") around the error of an `http.Transport.RoundTrip` to the origin (a dial to `node:26657`, a timeout, EOF, a cancelled context). `RoundTrip` errors do not carry the URL (only `http.Client` wraps them with it), so the line has no client IP, path, query or header values. Not yet observed on a live failure; force one on a scratch node before quoting it as measured. The ray id is Cloudflare's own request id, so with Cloudflare's records it names the request; on its own it is a timestamp. At debug, cloudflared logs every request's method, URL and headers, `CF-Connecting-IP` included. | both repos' `build-sdl.py` refuse `debug`/`trace` under every spelling (`--loglevel`, `--transport-loglevel`, `--proto-loglevel`, their `TUNNEL_*` env), and `--logfile`, `--log-directory`, `--trace-output`, `--config` |
+| Validator request filter (`edge`, earth-edge) | Logs one line at start (its listen and upstream addresses, route counts) and one on a fatal error, nothing per request: no address, path, query, body or header. Go's HTTP server error log, which can name a remote address, is discarded. It keeps no per-client state (its limits are per cost class, not per client), and it drops `CF-Connecting-IP`, `X-Forwarded-For`, `User-Agent`, `Cookie` and `Authorization` before forwarding, so the node never sees them. A refusal is a `403` to the client and nothing anywhere else. | chain repo `docker/edge/main.go` (`ErrorLog: io.Discard`), `filter/forward.go` (`clientHeaders`); `filter_test.go` checks the headers |
 | Backend | uvicorn `--no-access-log --no-proxy-headers`. Gas-grant logs carry only a refusal kind or a coarse error with hex and long numbers removed. The indexer's chain lease alerts drop the event's address and mask any address in its error text. The rate-limit sweep's error line names only the exception class. | `entrypoint.py`, `routers/gas.py` `_coarse`, `services/privacy/indexer.py` `_log_lease_alerts`, `services/ratelimit.py` sweep (on a timer and on every call; `tests/test_ratelimit.py`, `tests/test_groundworks_leases.py`) |
 | Web app | nginx `access_log off`, error log at `crit` | web repo `nginx.conf` |
 
@@ -64,8 +65,8 @@ Set these before launch, and check them after any dashboard change:
   **Bot Fight Mode off**. Each challenges or blocks requests on Cloudflare's own
   judgement and writes a Security Event for each, with IP and path. They are on by
   default and would mostly catch the VPN and Tor exits this policy recommends. None
-  is needed: the wallets and the backend are not browsers, and rules 0 to 4 are the
-  protection.
+  is needed: the wallets and the backend are not browsers, and the edge filter and
+  the rate limits are the protection.
 - **DDoS protection cannot be turned off.** Cloudflare's HTTP DDoS managed ruleset is
   always on, on every plan. Its sensitivity can be lowered, not removed; when it
   mitigates, each mitigated request is a Security Event with IP and path.
@@ -93,11 +94,14 @@ The policy covers what Earth records. Some parties see traffic whatever we do:
   retention period. Earth does not export any of it. What remains, with every
   setting above applied:
   - **Security Events**, with IP, path, query and user agent, for every request that
-    one of our rules blocks or rate-limits (rules 1 to 4: requests outside what our
-    clients send, and floods) or that Cloudflare's DDoS protection mitigates. One
-    ordinary case lands here: Keplr's own send screen opens `rpc.erth.network/websocket`,
-    which rule 1 blocks, so a Keplr-native send leaves an event with the IP and that
-    path (not the transaction, which is never sent on the socket).
+    one of our rules blocks or rate-limits (rule 1, websocket upgrades; rules 2 and
+    3, floods) or that Cloudflare's DDoS protection mitigates. Requests the edge
+    filter refuses are not among them: Cloudflare passes them and sees only a `403`
+    answer, as for any request. One ordinary case lands here: Keplr's own send screen
+    opens `rpc.erth.network/websocket`, which rule 1 blocks, so a Keplr-native send
+    leaves an event with the IP and that path (not the transaction, which is never
+    sent on the socket). With **Network → WebSockets** off instead of rule 1, check
+    whether Cloudflare records the refused upgrade before relying on it not to.
   - **Analytics**: aggregate traffic, and sampled individual requests (IP, path,
     country, user agent) whether or not any rule matched them, which the dashboard
     can show.

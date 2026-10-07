@@ -9,7 +9,7 @@ Dockerfile, and the entrypoint that lets anyone run a node. Nothing here is need
 *join* the network; it is only needed to operate this deployment.
 
     RELAUNCH.md             the runbook for launching earth-1 from a fresh genesis
-    akash/deploy.yaml       the deployed unit (node, cloudflared, relayer)
+    akash/deploy.yaml       the deployed unit (node, edge filter, cloudflared, relayer)
     akash/README.md         how the lease behaves, and what destroys it
     akash/REMOTE_SIGNER.md  moving the consensus key behind tmkms
     akash/genesis.sha256    the genesis we mean to run (pinned by hand)
@@ -40,7 +40,8 @@ chain's state**. A pod that is not Ready (crash-looping, or sleeping until
 
 earth-1 runs one node: the validator, which is also the full-history node behind
 rpc.erth.network and lcd.erth.network, and the RPC the privacy indexer reads
-`block_results` from. It never prunes and never state syncs, so its 200Gi data volume
+`block_results` from. The public reaches its RPC and LCD only through `edge`, the
+request filter in the same lease (akash/README.md, "Public RPC and LCD"). It never prunes and never state syncs, so its 200Gi data volume
 only grows. Akash cannot grow a volume in place: a bigger one is a new lease and a
 replay from block 1. Watch it, and alert well before half full:
 
