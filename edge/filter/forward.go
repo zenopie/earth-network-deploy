@@ -65,15 +65,28 @@ type fwdOpts struct {
 // by chain data. A backstop only: by the time the edge counts bytes the node
 // has built the whole answer, so the ceiling stops the copy (the edge's and
 // Cloudflare's bandwidth, and the node's write of the rest), not the node's
-// memory. The chain's per-tx result byte cap is what bounds that build;
-// these are set well above any answer that cap and the block limits allow
-// (block max_bytes 22 MiB, mempool max_tx_bytes 1 MiB, base64 in JSON).
+// memory. What bounds the build is the chain: consensus block max_bytes
+// 4 MiB (genesis), a tx's stored result capped at 1 MiB (app/result_cap.go,
+// about 10 MB of results per block at worst), and a default node admitting
+// txs up to 1 MiB (mempool max_tx_bytes). In JSON, bytes are base64 (4/3)
+// and an event attribute costs up to ~4.6x its proto size (one-byte keys and
+// values). Each ceiling sits above the largest answer those allow:
 const (
-	maxRespTx           = 8 << 20  // RPC tx, LCD txs/{hash}: one tx and its result
-	maxRespBlockResults = 32 << 20 // one block's results
-	maxRespSearch       = 32 << 20 // LCD tx.height=N: at most 50 txs with results
-	maxRespBlock        = 48 << 20 // RPC block: a full block, base64 in JSON
-	maxRespBlockLCD     = 96 << 20 // LCD block: block and sdk_block, both in full
+	// RPC tx: a 1 MiB tx (1.33 MiB) and a 1 MiB result (~4.6 MiB): ~6 MiB.
+	maxRespTx = 8 << 20
+	// LCD txs/{hash}: the tx twice (tx and tx_response.tx) and the
+	// result: ~7.5 MiB.
+	maxRespTxLCD = 12 << 20
+	// One block's results: ~10 MB of results at worst, which only a block
+	// built to be large reaches; past this a public read of it is cut.
+	maxRespBlockResults = 32 << 20
+	// LCD tx.height=N: at most 50 txs with their results.
+	maxRespSearch = 32 << 20
+	// RPC block: 4 MiB, txs in base64 and up to 1 MiB of evidence in JSON:
+	// ~7 MiB.
+	maxRespBlock = 12 << 20
+	// LCD block: block and sdk_block, both in full.
+	maxRespBlockLCD = 24 << 20
 )
 
 // Downstream writes (round-6 R6-E-4). The slot is held while the answer

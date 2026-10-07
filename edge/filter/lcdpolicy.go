@@ -48,7 +48,7 @@ var lcdSpecs = []lcdSpec{
 		body: []string{"tx_bytes", "txBytes", "tx"}},
 	// Commit polls and the wallets' activity: a point lookup in the tx
 	// index, but the answer is as large as the tx's stored result (bulk).
-	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs/{hash}", class: "bulk", maxResp: maxRespTx},
+	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs/{hash}", class: "bulk", maxResp: maxRespTxLCD},
 	// The explorer's search: one block's txs (lcd.go checkSearch).
 	{method: "GET", pattern: "/cosmos/tx/v1beta1/txs", class: "search", maxResp: maxRespSearch, params: map[string]string{
 		"query":    searchQuery,

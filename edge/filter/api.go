@@ -90,3 +90,10 @@ func MatchLCDPath(method, rawPath string) (string, bool) {
 	}
 	return rt.pattern, true
 }
+
+// AnswerCeilings lists the byte ceilings on public answers (forward.go), for
+// the conformance test that checks them against the pinned chain's block and
+// tx limits.
+func AnswerCeilings() (tx, txLCD, blockResults, search, block, blockLCD int64) {
+	return maxRespTx, maxRespTxLCD, maxRespBlockResults, maxRespSearch, maxRespBlock, maxRespBlockLCD
+}
