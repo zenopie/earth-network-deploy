@@ -13,9 +13,8 @@
 # in this repo rather than whatever the image happens to contain.
 #
 # A genesis passes only if it is post-ceremony (final audit BD-8): genesis_time
-# in the future, one gentx from the operator earth1n6amv… with the launch
-# consensus key PGqvPN4C…, and none of the placeholder validator's or devnet
-# accounts. --allow-placeholder turns those into WARNs, for checking the
+# in the future, one gentx from launch/launch.json's operator with its
+# consensus key, and none of the placeholder validator's or remove_accounts. --allow-placeholder turns those into WARNs, for checking the
 # pre-ceremony pin; never use it on the launch tag.
 #
 # What this cannot check: the copy baked into the image (/etc/earth/genesis.json).
@@ -51,16 +50,15 @@ FAIL=0
 check() {  # <label> <file>
   local got; got="$(sha "$2")"
   if [ "$got" = "$PIN" ]; then echo "ok    $1  $got"; else echo "FAIL  $1  $got (pin $PIN)"; FAIL=1; fi
-  python3 - "$2" "$WANT_CHAIN_ID" "$ALLOW_PLACEHOLDER" <<'PY' || FAIL=1
+  python3 - "$2" "$WANT_CHAIN_ID" "$ALLOW_PLACEHOLDER" "$HERE/launch/launch.json" <<'PY' || FAIL=1
 import json, sys, datetime
-# The ceremony's facts (chain repo scripts/ceremony.sh; RELAUNCH.md).
-OPERATOR = "earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr"
-CONSENSUS_PUBKEY = "PGqvPN4CxEkxvvh3tSBX0SGeBgjMdqQwZkdHt8FRLm4="
-PLACEHOLDERS = {
-    "earth14e6sqtf5y7mtzwykqreewe9kg3w94t0f25d54a": "placeholder validator",
-    "earth1s7rgscltvw8v3kzhj46pptdqg843ngs7th9ywp": "devnet faucet",
-    "earth1jtc2zjmmmyttdayz6aw8vfgt5qn4hg7rpxaar6": "old gas wallet",
-}
+# The ceremony's facts: launch/launch.json, the file the chain repo's
+# scripts/ceremony.sh --launch took (RELAUNCH.md).
+L = json.load(open(sys.argv[4]))
+OPERATOR = L["operator"]
+CONSENSUS_PUBKEY = L["consensus_pubkey"]
+PLACEHOLDERS = {"earth14e6sqtf5y7mtzwykqreewe9kg3w94t0f25d54a": "placeholder validator"}
+PLACEHOLDERS.update({a: "placeholder account" for a in L["remove_accounts"]})
 CS = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 def b32_data(addr):
     """bech32 -> payload bytes (checksum verified)."""

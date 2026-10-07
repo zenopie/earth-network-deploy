@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "earth-1's launch identities: the input to the chain repo's scripts/ceremony.sh",
+    "--launch, and what bin/check-genesis.sh and bin/build-sdl.py check the launch",
+    "genesis and the validator key against. Public values only (an address and",
+    "public keys); the operator's mnemonic stays in .env and the consensus private",
+    "key in .env's PRIV_VALIDATOR_KEY_B64.",
+    "",
+    "operator: the genesis validator's operator account (VALIDATOR_MNEMONIC).",
+    "consensus_pubkey: its consensus key, never used to sign any chain.",
+    "remove_accounts: the placeholder genesis's devnet faucet and old ads-for-gas",
+    "wallet, whose keys have been on a laptop.",
+    "used_consensus_keys: the key that signed the earlier earth-1; never again",
+    "under this chain id."
+  ],
+  "operator": "earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr",
+  "consensus_pubkey": "PGqvPN4CxEkxvvh3tSBX0SGeBgjMdqQwZkdHt8FRLm4=",
+  "remove_accounts": [
+    "earth1s7rgscltvw8v3kzhj46pptdqg843ngs7th9ywp",
+    "earth1jtc2zjmmmyttdayz6aw8vfgt5qn4hg7rpxaar6"
+  ],
+  "used_consensus_keys": [
+    "kTMzoCBEj1g2z49K1D/jxuLGrhTsnzfTx6Gf1LnBUJw="
+  ]
+}
