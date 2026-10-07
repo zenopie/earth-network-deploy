@@ -21,6 +21,8 @@ Run the steps in order. Each **Check** must pass before the next step.
 | Backend | v3.0.0 on lease `1790918719150` (provider `akash1aaul837r7en7hpk9wv2svg8u78fdq0t2j2e82z`), idle. Replaced in section 4. |
 | Web | v2.0.0 on lease `1787052820013`, served at `erth.network`. Redeployed in section 5. |
 | `akash/genesis.sha256` | Pins `acb96128…`, the chain repo's `networks/genesis.json` at `6d3500a`, a **pre-ceremony** genesis that is already stale: the chain repo's genesis is `34fe7441…` at `20a91c6`, and it will change again with every chain commit that touches genesis inputs until the ceremony. So `bin/check-genesis.sh --chain` FAILS the pin now, with or without `--allow-placeholder`; that is expected. Nothing is pinned until the ceremony's genesis exists: section 2, step 4 writes its sha256 here, and from then on the pin and the launch tag's `genesis.json` must match. |
+| Launch identities | `launch/launch.json`: the operator, its consensus pubkey, the placeholder accounts the ceremony removes and the consensus key never to reuse. The chain repo holds none of them: its `scripts/ceremony.sh` takes this file (`--launch`, via `bin/ceremony.sh`), and `bin/check-genesis.sh` and `bin/build-sdl.py` read it. |
+| Node image | Not built. The chain image is generic (earthd, the release genesis, a minimal entrypoint); our runtime (keys from `.env`, the keyless guard, refusing a foreign genesis, cosmovisor, the relayer) is `node/` here, an image built `FROM` the chain release's image by digest (`node/base.pin`). `akash/deploy.yaml` carries the all-zero placeholder for `ghcr.io/zenopie/earth-network-node` on `node` and `relayer`, refused by every release build; section 2, step 4 builds and pins it (gate 1.5). |
 | Edge image | Not built. `akash/deploy.yaml` carries the all-zero placeholder digest for `ghcr.io/zenopie/earth-network-edge`, which every build that pins the node refuses; section 1.4 builds, pushes and pins it. `edge/conformance/chain.pin` names chain `0767700` (privacy/orchard, not yet pushed: fetch with `EARTH_CHAIN_SRC`). |
 
 **One node.** The validator is also the full-history node: it serves
@@ -72,13 +74,31 @@ reads `block_results` from it from height 1. There is no separate archive lease.
    - Any later change to `edge/` or to `chain.pin` repeats both steps, and goes out
      with `bin/deploy.sh` like any SDL change (an image change on `edge` only; the
      node's volume is untouched).
-5. **Backend release** with `EARTHD_VERSION` / `EARTHD_SHA256` (backend `Dockerfile`)
+   - `edge/conformance` also checks the answer ceilings (`edge/filter/forward.go`)
+     against the pinned chain's block `max_bytes` (4 MiB) and its 1 MiB per-tx
+     result cap: a chain release that changes either fails here.
+5. **The node image built on the launch tag and pinned.** The chain's image is
+   generic; `node/` is ours (`node/Dockerfile` `FROM` the chain image by digest,
+   `node/entrypoint.sh`, `node/relayer.sh`, `node/drop-root.sh`, cosmovisor and rly
+   built in). It needs the launch tag's image, so it is done in section 2, step 4:
+
+       node/entrypoint_test.sh                    # all pass
+       bin/build-node.sh --base <launch tag>      # writes node/base.pin; commit it
+       bin/build-node.sh --pin                    # builds, pushes, pins node + relayer
+
+   `--pin` writes `ghcr.io/zenopie/earth-network-node@sha256:<digest>  # FROM <base>`
+   on both image lines; commit them, and make the `earth-network-node` package
+   **public**. `build-sdl.py` refuses a release build (`deploy.sh` / `create.sh
+   <tag>`) unless the tag's chain image is `node/base.pin` and both lines' `FROM`,
+   and refuses the placeholder, the chain image itself, or a `command` on `node`.
+   Any later change to `node/` repeats `--pin` (no new `--base`).
+6. **Backend release** with `EARTHD_VERSION` / `EARTHD_SHA256` (backend `Dockerfile`)
    bumped to the launch tag. `/gas/register` runs `earthd gas-check registration`,
    the chain's own check: an older binary cannot check the new formats. So this
    release follows the chain tag (section 4.1).
-6. **Web app release** from its release branch: `npm run build` and `npm run check`
+7. **Web app release** from its release branch: `npm run build` and `npm run check`
    pass (`check:dex-live` needs the chain; run it after launch).
-7. **Docs**: the docs release branch, with the `TODO(relaunch)` placeholders in
+8. **Docs**: the docs release branch, with the `TODO(relaunch)` placeholders in
    `docs/run-a-node/join.md` (launch tag, genesis sha256, node id, P2P address) filled
    in once sections 2 and 3 have the values. Published at launch.
 
@@ -96,33 +116,38 @@ height 2.
          --validator-key --node-key --tunnel
 
    It prints the `node id` (from `NODE_KEY_B64`) and the consensus address and pubkey
-   (from `PRIV_VALIDATOR_KEY_B64`). It refuses a key whose pubkey is not `PGqvPN4C…`
-   (`EXPECTED_CONSENSUS_PUBKEY`), the old chain's `kTMzo…`, or an address that does not
+   (from `PRIV_VALIDATOR_KEY_B64`). It refuses a key whose pubkey is not
+   `launch/launch.json`'s `consensus_pubkey` (`PGqvPN4C…`), one in its
+   `used_consensus_keys` (the old chain's `kTMzo…`), or an address that does not
    derive from the pubkey. With `--tunnel` it also needs `CHAIN_EDGE_TOKEN` in `.env`
    (the backend's, section 3.4): the edge's backend reserve is derived from it.
-2. **Run the ceremony** in the chain repo, on the operator's machine:
+2. **Run the ceremony** on the operator's machine, from this repo, against the chain
+   checkout at the release candidate:
 
-       scripts/ceremony.sh --genesis-time <RFC3339, UTC> \
-         --pubkey '{"@type":"/cosmos.crypto.ed25519.PubKey","key":"PGqvPN4CxEkxvvh3tSBX0SGeBgjMdqQwZkdHt8FRLm4="}' \
+       bin/ceremony.sh <chain checkout> --genesis-time <RFC3339, UTC> \
          --memo-peer <node id>@<host>:26656 --moniker <name>
 
-   It reads only the `VALIDATOR_MNEMONIC` line of this repo's `.env` (`--env-file`,
-   else `$EARTH_DEPLOY_ENV`, else `../earth-network-deploy/.env` beside the chain
-   checkout), never prints it, and refuses a mnemonic that is not
-   `earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr`. All or nothing, it:
-   - swaps the placeholder validator `earth14e6sqtf5y7mtzwykqreewe9kg3w94t0f25d54a`
-     for the operator (same 1,000 ERTH) in `networks/genesis/accounts.json`, and
-     removes the devnet faucet `earth1s7rgs…` and the old gas wallet `earth1jtc2z…`;
+   That runs the chain repo's `scripts/ceremony.sh --launch launch/launch.json
+   --env-file .env …`: the chain repo holds no launch identity, this repo's
+   `launch/launch.json` is them. It reads only the `VALIDATOR_MNEMONIC` line of `.env`,
+   never prints it, and refuses a mnemonic that is not `launch.json`'s `operator`
+   (`earth1n6amvkgfrrgy6ulhurewnm0endkgye69fkcapr`). All or nothing, it:
+   - swaps the placeholder validator (the committed gentx's signer,
+     `earth14e6sqtf5y7mtzwykqreewe9kg3w94t0f25d54a`) for the operator (same 1,000
+     ERTH) in `networks/genesis/accounts.json`, and removes `remove_accounts` (the
+     devnet faucet `earth1s7rgs…` and the old gas wallet `earth1jtc2z…`);
    - writes `genesis_time` (refused unless in the future) to `chain.json`;
-   - signs a new gentx with `--pubkey` (no private consensus key is written), keeping
-     the placeholder's self-delegation (100 ERTH) and commission. A key that signed an
-     earlier earth-1 (`kTMzo…`, consensus address `90603989…`) is refused;
+   - signs a new gentx with `consensus_pubkey` (no private consensus key is
+     written), keeping the placeholder's self-delegation (100 ERTH) and commission. A
+     key in `used_consensus_keys` (`kTMzo…`, consensus address `90603989…`) is
+     refused;
    - rebuilds the genesis (`scripts/build-genesis.sh`, then `--check`) and runs the
-     genesis tests with `EARTH_REQUIRE_CEREMONY=1`, then prints the sha256.
+     genesis tests with `EARTH_REQUIRE_CEREMONY=1 EARTH_CEREMONY_CONFIG=launch.json`,
+     then prints the sha256.
 
    `--memo-peer` and `--moniker` are required (no defaults). `ceremony.sh` refuses a
-   private, loopback, link-local or unspecified host and the devnet moniker
-   `earth-akash-devnet`.
+   private, loopback, link-local or unspecified host and the placeholder gentx's
+   moniker (`earth-akash-devnet`).
 
    **The memo's port will be wrong, permanently.** The memo is sha-pinned into the
    launch genesis, and the ceremony runs before the lease exists. Akash maps the
@@ -151,7 +176,10 @@ height 2.
    commit: binaries (`linux/amd64`, `linux/arm64`), `checksums.txt`, `genesis.json`, and
    the image on ghcr. The image's baked `/etc/earth/genesis.json` is what every node
    installs. **In this repo**, write the printed sha256 into `akash/genesis.sha256`
-   and commit.
+   and commit. Then build and pin the node image on that tag (gate 1.5):
+   `bin/build-node.sh --base <tag>`, commit `node/base.pin`, `bin/build-node.sh
+   --pin`, commit `akash/deploy.yaml`; and point `edge/conformance/chain.pin` at the
+   tag's commit and rerun conformance (gate 1.4).
 5. **Pin the wallets' genesis check.** Earth Wallet's own-node setting compares a
    node's `/genesis_chunked` with a pinned hash. CometBFT serves its own
    re-encoding of the genesis, not the file bytes, so this hash differs from
@@ -175,9 +203,11 @@ height 2.
 **Check:**
 
     bin/check-genesis.sh <tag> --chain <chain checkout at the tag>   # no FAIL, no --allow-placeholder
-    bin/digest.sh <tag>                                              # resolves to ghcr...@sha256
+    bin/digest.sh <tag>                                              # resolves to ghcr...@sha256, = node/base.pin
+    python3 bin/build-sdl.py . /dev/null "$(bin/digest.sh <tag>)" --fullnode --no-statesync   # no refusal
 
-and, in a container from that digest, `earthd version --long` shows the tag's commit.
+and, in a container from the node image, `earthd version --long` shows the tag's
+commit.
 
 ## 3. Validator lease
 

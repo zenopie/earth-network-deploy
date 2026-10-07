@@ -5,13 +5,20 @@ secrets layout, and the runbooks for a node that has a validator key and a tunne
 token behind it.
 
 The chain itself is public at `zenopie/earth-network-chain`: node software, genesis,
-Dockerfile, and the entrypoint that lets anyone run a node. Nothing here is needed to
-*join* the network; it is only needed to operate this deployment. That includes the
-request filter in front of the public RPC and LCD (`edge/`): it is this operator's
-infrastructure, not node software, so it lives and is built here.
+and a generic image with a minimal entrypoint that lets anyone run a node. Nothing
+here is needed to *join* the network; it is only needed to operate this deployment.
+That includes our node image (`node/`: key injection, the keyless guard, refusing a
+foreign genesis, cosmovisor, the relayer), built `FROM` the chain image by digest,
+the request filter in front of the public RPC and LCD (`edge/`), and earth-1's launch
+identities (`launch/launch.json`, the input to the chain's ceremony script): this
+operator's infrastructure and decisions, not node software, so they live here.
 
     RELAUNCH.md             the runbook for launching earth-1 from a fresh genesis
     akash/deploy.yaml       the deployed unit (node, edge filter, cloudflared, relayer)
+    node/                   the node image: Dockerfile FROM the chain image (base.pin),
+                            entrypoint.sh, relayer.sh, drop-root.sh, entrypoint_test.sh
+    launch/launch.json      earth-1's launch identities (operator, consensus pubkey,
+                            accounts to remove, consensus keys never to reuse)
     edge/                   earth-edge, the request filter: its own Go module and image
     edge/conformance/       its checks against CometBFT, grpc-gateway and the chain's
                             protos, at the chain commit in chain.pin (fetch-chain.sh)
@@ -20,8 +27,11 @@ infrastructure, not node software, so it lives and is built here.
     akash/genesis.sha256    the genesis we mean to run (pinned by hand)
     bin/check-genesis.sh    a release's / checkout's genesis vs that pin
     bin/digest.sh           resolve a released tag to its image digest
+    bin/ceremony.sh         run the chain repo's launch ceremony with launch/launch.json
+    bin/build-node.sh       node/base.pin from a chain tag (--base); build + push the
+                            node image (--pin: write its digest on node and relayer)
     bin/build-edge.sh       build + push the edge image, print (--pin: write) its digest
-    bin/build-sdl.py        SDL + digest + secrets -> the copy that gets sent
+    bin/build-sdl.py        SDL + release check + secrets -> the copy that gets sent
     bin/create.sh           a NEW lease (new volume: the chain starts at height 1)
     bin/deploy.sh           update the lease in place (keeps the volumes)
     bin/lease-logs.py       container logs and kubernetes events, via the provider
@@ -56,22 +66,21 @@ replay from block 1. Watch it, and alert well before half full:
 
 See RELAUNCH.md, section 3 ("Disk").
 
-## Why the digest is resolved rather than committed
+## Which digests are committed
 
 The chain repo used to rewrite this SDL with the image digest and commit it back to
 master. That put deployment state in a public repository, and a build racing a human
-push meant one of them lost.
+push meant one of them lost. The chain repo now knows nothing of this deployment.
 
-So the digest is read from the registry at deploy time. `bin/digest.sh` takes a tag
-and returns `ghcr.io/...@sha256:...`, using no credentials: the package has to be
-public anyway or the Akash provider could not pull it. The node's and relayer's
-`image:` lines committed in `akash/deploy.yaml` are placeholders; what runs is what
-`deploy.sh` / `create.sh` pinned.
+Both images the lease runs are built here, so their digests are committed in
+`akash/deploy.yaml`: the node's (and relayer's) by `bin/build-node.sh --pin`
+(RELAUNCH.md 1.5), with the chain image it was built `FROM`, and the edge's by
+`bin/build-edge.sh --pin` (1.4). The chain release is still resolved at deploy
+time: `bin/digest.sh <tag>` returns the chain image's `ghcr.io/...@sha256:...`
+with no credentials, and `build-sdl.py` refuses unless it is `node/base.pin`, the
+base of the committed node image.
 
-The edge is the exception: its image is built from this repo, so its digest is
-committed in `akash/deploy.yaml` by `bin/build-edge.sh --pin` (RELAUNCH.md 1.4), and
-the node pin does not touch it.
-
+    node/entrypoint_test.sh                                           # the node entrypoint
     (cd edge && go test ./...)                                        # the filter
     edge/conformance/fetch-chain.sh && (cd edge/conformance && go test ./...)
 

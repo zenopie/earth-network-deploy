@@ -10,17 +10,27 @@ One deployment, four services:
 The backend (gas grants and the privacy indexer) is a separate repo, image and lease
 (`earth-network-backend`), with its own tunnel. Closing a lease destroys its volumes,
 and this one holds the chain's state: a backend change must not be able to take it.
-The image's entrypoint (`docker/entrypoint.sh` in the chain repo) installs the baked
-genesis, checks its sha256, and starts `earthd` under cosmovisor. The relayer runs
-the same image. `edge` runs its own (below).
+The node image's entrypoint (`node/entrypoint.sh`) installs the baked genesis, checks
+its sha256, injects the consensus and node keys, refuses a foreign genesis or a
+leftover consensus key, and starts `earthd` under cosmovisor. The relayer runs the
+same image. `edge` runs its own (below).
 
 ## The images
 
-**node and relayer:** CI in the chain repo builds and pushes on
-`v[0-9]+.[0-9]+.[0-9]+` tags only. The digest is not committed here:
-`bin/digest.sh <tag>` reads it from the registry at deploy time, and
-`bin/deploy.sh` / `bin/create.sh` pin the submitted copy to it (only the lines
-naming that repository).
+**node and relayer:** this repo's `node/` (`node/Dockerfile`), built `FROM` the
+chain's generic image by digest. The chain repo's CI builds that image on
+`v[0-9]+.[0-9]+.[0-9]+` tags only: `earthd`, its libraries, the release genesis and
+a minimal entrypoint, nothing of ours. `node/base.pin` names the chain image
+(`bin/build-node.sh --base <tag>`); `bin/build-node.sh --pin` builds ours on it (the
+entrypoint, `relayer.sh` and `drop-root.sh` from `node/`, cosmovisor and rly built
+in), pushes `ghcr.io/zenopie/earth-network-node:<commit>` and writes its digest,
+with the base as a `# FROM` comment, on the `node` and `relayer` lines of
+`akash/deploy.yaml`. That digest is committed. `bin/deploy.sh` / `bin/create.sh
+<tag>` resolve the chain tag (`bin/digest.sh`), and `build-sdl.py` refuses unless it
+is `node/base.pin` and both lines' `FROM`, so what deploys is the node image built
+on that release. It also refuses the placeholder, the chain image itself and a
+`command` on `node`. `node/entrypoint_test.sh` tests the entrypoint without a
+container. RELAUNCH.md 1.5 is the procedure.
 
 **edge:** built from this repo's `edge/` (`edge/Dockerfile`: a static binary on
 `scratch`, uid 65532, nothing else) by `bin/build-edge.sh --pin`, which pushes
@@ -31,7 +41,8 @@ that pins the node, a tag instead of a digest, and a `command` or `args` on `edg
 RELAUNCH.md 1.4 is the procedure, including the conformance run against the chain
 commit `edge/conformance/chain.pin` names.
 
-Both packages must be public on ghcr.io, or the provider cannot pull them.
+All three packages (earth-network-chain, -node, -edge) must be public on ghcr.io:
+the provider pulls the node and edge images, and the node build pulls the chain's.
 
 ## Deploy
 
@@ -232,14 +243,18 @@ ABCI mutex, so a consensus step waits behind at most four bounded calls; reads a
 broadcasts have separate slots, so a flood of `abci_query` cannot refuse wallet
 broadcasts (round-6 R6-E-3).
 
-**Answer ceilings** (round-6 R6-E-1). A public answer to `tx` / `txs/{hash}` is cut
-off past 8 MiB, `block_results` and the `tx.height=N` search past 32 MiB, RPC `block`
-past 48 MiB and LCD blocks past 96 MiB (declared larger: `502`; streamed past it: the
-connection is aborted). The backend has no ceiling. This is a backstop: the node has
-built the whole answer before the edge counts a byte, and a wasm tx can make its stored
-result tens of MB, which the node builds several times over per request. The `bulk`
-class bounds how many such builds run at once; **the chain's per-tx result byte cap
-is the real fix**, since it bounds what any one of these answers can be.
+**Answer ceilings** (round-6 R6-E-1). A public answer to RPC `tx` is cut off past
+8 MiB, LCD `txs/{hash}` past 12 MiB, `block_results` and the `tx.height=N` search past
+32 MiB, RPC `block` past 12 MiB and LCD blocks past 24 MiB (declared larger: `502`;
+streamed past it: the connection is aborted). The backend has no ceiling. This is a
+backstop: the node has built the whole answer before the edge counts a byte. What
+bounds the build is the chain: block `max_bytes` 4 MiB (genesis), a tx's stored
+result capped at 1 MiB (about 10 MB of results per block at worst), and a default
+node admitting txs of up to 1 MiB. Each ceiling is above the largest answer those
+allow (`edge/filter/forward.go` has the arithmetic; `edge/conformance` checks it
+against the pinned chain's genesis), except `block_results` of a block built to be
+large, whose public read is cut. The `bulk` class bounds how many such builds run
+at once.
 
 A changed allowlist or cap is a change to `edge/filter/`
 here, with a case in its tests, then `bin/build-edge.sh --pin`; it goes onto the lease
@@ -477,7 +492,7 @@ The backend reaches the chain through the tunnel's hostnames.
 ## IBC relayer
 
 Off by default (`ENABLED=false`). It shares the node's image and runs
-`docker/relayer.sh` instead of the node entrypoint. Co-locating it with the validator
+`node/relayer.sh` instead of the node entrypoint. Co-locating it with the validator
 is safe: a relayer cannot forge packets or move funds, and its key pays gas and holds
 nothing else.
 
