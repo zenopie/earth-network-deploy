@@ -1,4 +1,5 @@
-# Akash SDL — earth-1's validator: the node, its Cloudflare tunnel, the relayer.
+# Akash SDL — earth-1's validator: the node, its request filter (edge), its
+# Cloudflare tunnel, the relayer.
 #
 # PRIVACY RELAUNCH (fresh genesis, see RELAUNCH.md at the repo root). What
 # changed in this file for it: the app mempool is pinned to the no-op mempool
@@ -237,27 +238,30 @@ services:
       # rpc.erth.network and lcd.erth.network are served by THIS process, the
       # network's only signer. A flood of expensive queries competes with
       # consensus for its 2 CPUs and its disk. These bound what one burst can
-      # take; the per-IP limits live at Cloudflare (akash/README.md, "Public RPC
-      # and LCD limits"). Read by earthd from EARTHD_-prefixed env, like the
-      # history settings above. bin/build-sdl.py refuses an SDL without them.
+      # take; the allowlist and per-class caps are the edge filter's, the per-IP
+      # limits Cloudflare's (akash/README.md, "Public RPC and LCD"). Read by
+      # earthd from EARTHD_-prefixed env, like the history settings above.
+      # bin/build-sdl.py refuses an SDL without them.
       #
       # app.toml query-gas-limit: gas cap for one gRPC/LCD/abci_query query (0,
       # the SDK default, is unbounded). The largest legitimate query is the
       # backend's 1,000-entry Query/Handles page, a few million gas; 50M leaves
       # an order of magnitude over that and stops a query that walks a whole
       # store at a historical height. Simulate is not affected. /store/ raw
-      # queries and tx search do not go through it (Cloudflare covers those).
+      # queries and tx search do not go through it (the edge filter narrows
+      # those to fixed reads and equality searches, a few at a time).
       - EARTHD_QUERY_GAS_LIMIT=50000000
-      # config.toml [rpc]: every client reaches 26657 through the one cloudflared
-      # connector, so this caps concurrent RPC requests (default 900).
+      # config.toml [rpc]: every client reaches 26657 through the edge filter
+      # (whose own caps total well under this), so this caps concurrent RPC
+      # requests (default 900).
       - EARTHD_RPC_MAX_OPEN_CONNECTIONS=100
       # Websocket subscribers, each also a broadcast_tx_commit in flight
       # (default 100). 0 refuses every subscribe and broadcast_tx_commit
       # (rpc/core/events.go, mempool.go: NumClients() >= max). No client of
       # this chain subscribes: wallets, web app and backend poll by hash, the
-      # relayer (rly v2) polls, and Cloudflare blocks /websocket (README,
-      # rule 1). Keplr's own send screen subscribes for its "tx confirmed"
-      # notice; that notice does not appear, the send itself goes through.
+      # relayer (rly v2) polls, and the edge filter refuses /websocket.
+      # Keplr's own send screen subscribes for its "tx confirmed" notice; that
+      # notice does not appear, the send itself goes through.
       - EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS=0
       # The unsafe routes (dial_seeds, dial_peers, unsafe_flush_mempool, the
       # profiler) stay off. false is the default; pinned.
@@ -290,10 +294,18 @@ services:
       # - PRIV_VALIDATOR_LADDR=tcp://0.0.0.0:26659
 
     expose:
-      # Tunnel-only. Nothing is published on a provider port: every entry below
-      # goes to `cloudflared`, so the only way in is a Cloudflare hostname.
+      # RPC and LCD go to `edge` only: the request filter (earth-edge, below)
+      # is the one service the public hostnames reach, and the only one these
+      # ports are published to. Nothing is published on a provider port.
       # Verified serving before the mapped ports were removed, because dropping
       # them is a structural change and cannot be undone in place.
+      #
+      # A published service is a name inside the lease, not a firewall: any
+      # container in this deployment can still dial node:26657 (the relayer
+      # does). What keeps public traffic on the filter is Cloudflare's Public
+      # Hostnames pointing at edge:*, never node:* (akash/README.md, "Check
+      # from outside" proves it: tx_search must come back refused).
+      #
       # LCD. Not `as: 80`: that asks the provider for an HTTP ingress on a
       # generated hostname, and on the first lease of this deployment the pod
       # went ready and served RPC while the hostname returned nginx 404 for ten
@@ -302,11 +314,11 @@ services:
       - port: 1317
         as: 1317
         to:
-          - service: cloudflared
+          - service: edge
       - port: 26657
         as: 26657
         to:
-          - service: cloudflared
+          - service: edge
       # Consensus signer. This socket cannot authenticate whoever connects, so
       # anyone who reaches it can ask the KMS to sign votes the validator never
       # cast. Never give this one `global: true`, not even briefly while
@@ -351,6 +363,53 @@ services:
           mount: /data
           readOnly: false
 
+  # --- the request filter ---------------------------------------------------
+  # earth-edge (chain repo docker/edge): the public RPC and LCD pass through
+  # it and only it. It serves an allowlist of what the wallets, the web app,
+  # the backend, `earthd --node` and state sync call; decodes each request
+  # exactly as CometBFT and the gateway would and forwards one it wrote
+  # itself; caps how many expensive calls (simulate, raw store reads, the tx
+  # search) reach the signer at once; and logs no request (NO_LOGS.md).
+  # akash/README.md, "Public RPC and LCD", is what it serves and why.
+  #
+  # Same image as the node, so the digest pin covers it and it changes only
+  # with a chain release. Its own service, so its CPU and memory are its own
+  # cgroup's and a flood it is refusing costs the signer nothing.
+  edge:
+    # Placeholder, pinned with the node's image at deploy time: same image.
+    image: ghcr.io/zenopie/earth-network-chain@sha256:03c274793328ee4b1a4e38eab302a8b4040a7e27ce0fd35eaa21829331dd4377
+    # Not root: it parses what strangers send. setpriv is in the image (the
+    # node's drop-root.sh uses it), and earth-edge refuses to start as root.
+    command:
+      - setpriv
+      - --reuid=earth
+      - --regid=earth
+      - --clear-groups
+      - --no-new-privs
+      - /usr/local/bin/earth-edge
+    env:
+      - EDGE_RPC_UPSTREAM=http://node:26657
+      - EDGE_LCD_UPSTREAM=http://node:1317
+      - EDGE_RPC_LISTEN=:26657
+      - EDGE_LCD_LISTEN=:1317
+      # Open client connections per listener. cloudflared multiplexes every
+      # client onto a few connections to it, so this bounds idle keep-alives.
+      - EDGE_MAX_CONNS=256
+      # One OS thread of Go, sized to the profile's 0.5 CPU, and a soft heap
+      # limit under its memory (request bodies are capped at 1 MiB and 16 are
+      # held at once, so the steady heap is a few MiB).
+      - GOMAXPROCS=1
+      - GOMEMLIMIT=160MiB
+    expose:
+      - port: 26657
+        as: 26657
+        to:
+          - service: cloudflared
+      - port: 1317
+        as: 1317
+        to:
+          - service: cloudflared
+
   # --- the tunnel ----------------------------------------------------------
   # Dials out to Cloudflare, so it needs no inbound port and nothing is exposed
   # for it. One connector serves every hostname because both origins are in this
@@ -359,9 +418,10 @@ services:
   # traffic steering, so connectors that could reach different origins would
   # black-hole a share of requests non-deterministically.
   #
-  # Public Hostnames are configured on Cloudflare's side, pointing at:
-  #   lcd.*  -> http://node:1317
-  #   rpc.*  -> http://node:26657
+  # Public Hostnames are configured on Cloudflare's side, pointing at the
+  # filter, never at the node:
+  #   lcd.*  -> http://edge:1317
+  #   rpc.*  -> http://edge:26657
   #
   # The backend has its own tunnel in its own repo; one tunnel per deployment,
   # because a tunnel's replicas are chosen by proximity with no traffic
@@ -559,6 +619,17 @@ profiles:
         storage:
           - size: 512Mi
 
+    edge:
+      resources:
+        # A Go proxy: parsing and copying bytes. The node does the work it
+        # forwards, under the filter's per-class caps.
+        cpu:
+          units: 0.5
+        memory:
+          size: 192Mi
+        storage:
+          - size: 256Mi
+
     cloudflared:
       resources:
         # A Go binary holding four outbound connections.
@@ -582,6 +653,9 @@ profiles:
         relayer:
           denom: uakt
           amount: 10000
+        edge:
+          denom: uakt
+          amount: 10000
         cloudflared:
           denom: uakt
           amount: 10000
@@ -597,6 +671,10 @@ deployment:
   relayer:
     dcloud:
       profile: relayer
+      count: 1
+  edge:
+    dcloud:
+      profile: edge
       count: 1
   cloudflared:
     dcloud:

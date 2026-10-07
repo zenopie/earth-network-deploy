@@ -39,7 +39,7 @@
 # each tool needs.
 #
 # The `services=` query parameter is accepted and IGNORED by the provider; filtering
-# happens here instead. Containers are named `node-0`, `relayer-<hash>`, `cloudflared-<hash>`,
+# happens here instead. Containers are named `node-0`, `edge-<hash>`, `relayer-<hash>`, `cloudflared-<hash>`,
 # so `--service node` matches on prefix. Expect ~100 lines per container however large
 # --tail is, and only the CURRENT container instance: a crash-looping container loses
 # its previous run's output, so pull early.
@@ -207,7 +207,7 @@ def ws_stream(host, port, path, token, on_line, provider=""):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--service", help="container name prefix, e.g. node / relayer / cloudflared")
+    ap.add_argument("--service", help="container name prefix, e.g. node / edge / relayer / cloudflared")
     ap.add_argument("--tail", type=int, default=100)
     ap.add_argument("--follow", action="store_true")
     ap.add_argument("--dseq", help="lease to target; defaults to DSEQ in .env")

@@ -170,7 +170,7 @@ open(out, "w").write(s)
 d = yaml.safe_load(s)
 assert d["version"] == "2.0", f'version became {d["version"]!r}'
 svcs = d["services"]
-assert set(svcs) == {"node", "relayer", "cloudflared"}, sorted(svcs)
+assert set(svcs) == {"node", "edge", "relayer", "cloudflared"}, sorted(svcs)
 
 def envmap(name):
     if name not in svcs:
@@ -302,7 +302,8 @@ for k, want in (("EARTHD_PRUNING", "nothing"),
                 ("UNSAFE_SKIP_BACKUP", "true")):
     assert n.get(k) == want, f"the full-history node needs {k}={want}, has {n.get(k)!r}"
 # BD-6: the public RPC/LCD is served by the only signer. Bound what one burst
-# of queries can take from consensus (per-IP limits are at Cloudflare).
+# of queries can take from consensus (the allowlist and per-class caps are
+# the edge filter's, per-IP limits Cloudflare's).
 qgl = n.get("EARTHD_QUERY_GAS_LIMIT", "0")
 assert qgl.isdigit() and int(qgl) > 0, "EARTHD_QUERY_GAS_LIMIT must be set and > 0 (0 is unbounded)"
 for k, cap in (("EARTHD_RPC_MAX_OPEN_CONNECTIONS", 200),
@@ -310,10 +311,10 @@ for k, cap in (("EARTHD_RPC_MAX_OPEN_CONNECTIONS", 200),
     v = n.get(k, "")
     assert v.isdigit() and 0 < int(v) <= cap, f"{k} must be set to 1..{cap}, has {v!r}"
 # R3-BD-1: no subscriptions at all. Nothing of ours subscribes, and a socket
-# is how tx_search got past Cloudflare's URI checks; Cloudflare now blocks
+# is how tx_search got past Cloudflare's URI checks; the edge filter refuses
 # /websocket, and this is the node's own half of that.
 assert n.get("EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS") == "0", (
-    "EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS must be 0 (akash/README.md, rule 1)")
+    "EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS must be 0 (akash/README.md, \"Public RPC and LCD\")")
 assert n.get("EARTHD_RPC_UNSAFE") == "false", "EARTHD_RPC_UNSAFE must be false"
 assert not n.get("STATESYNC_RPC_SERVERS"), (
     "STATESYNC_RPC_SERVERS set: state sync floors the node at its trust height "
@@ -372,8 +373,40 @@ assert "rpc-server:error" in ll, "EARTHD_LOG_LEVEL must hold rpc-server at error
 img = svcs["node"]["image"]
 if "relayer" in svcs:
     assert img == svcs["relayer"]["image"], "node and relayer images differ"
+
+# The public RPC and LCD reach the node only through earth-edge, the request
+# filter (akash/README.md, "Public RPC and LCD"; R4-E-1..3). Its allowlist
+# is what protects the signer now; Cloudflare only rate-limits. So: the
+# node's 26657 and 1317 are published to `edge` alone, `edge` to
+# `cloudflared` alone, neither on a provider port, and `edge` runs the
+# node's own image as `earth`.
+def expose_map(name):
+    return {e["port"]: e.get("to") or [] for e in (svcs[name].get("expose") or [])}
+
+ne, ee = expose_map("node"), expose_map("edge")
+for port in (26657, 1317):
+    assert ne.get(port) == [{"service": "edge"}], (
+        "node port %d must be published to service edge only (the filter), has %r"
+        % (port, ne.get(port)))
+    assert ee.get(port) == [{"service": "cloudflared"}], (
+        "edge port %d must be published to service cloudflared only, has %r" % (port, ee.get(port)))
+assert set(ee) == {26657, 1317}, "edge publishes only 26657 and 1317, has %r" % sorted(ee)
+ed = svcs["edge"]
+assert ed["image"] == img, "edge must run the node's image (the pinned digest covers it)"
+ecmd = ed.get("command") or []
+assert ecmd[:1] == ["setpriv"] and "--reuid=earth" in ecmd and ecmd[-1:] == ["/usr/local/bin/earth-edge"], (
+    "edge must run /usr/local/bin/earth-edge under setpriv --reuid=earth, has %r" % ecmd)
+e = envmap("edge")
+assert e.get("EDGE_RPC_UPSTREAM") == "http://node:26657" and e.get("EDGE_LCD_UPSTREAM") == "http://node:1317", (
+    "edge upstreams must be the node: %r" % {k: v for k, v in e.items() if k.endswith("UPSTREAM")})
+assert set(e) <= {"EDGE_RPC_UPSTREAM", "EDGE_LCD_UPSTREAM", "EDGE_RPC_LISTEN", "EDGE_LCD_LISTEN",
+                  "EDGE_MAX_CONNS", "GOMAXPROCS", "GOMEMLIMIT"}, (
+    "edge carries env it has no use for: %r" % sorted(set(e) - {"EDGE_RPC_UPSTREAM"}))
+assert e.get("GOMAXPROCS") and e.get("GOMEMLIMIT"), "edge needs GOMAXPROCS and GOMEMLIMIT (bounded runtime)"
 print("services:   ", ", ".join(sorted(svcs)))
-print("node image: ", img)
+print("node image: ", img, "(edge: same)")
+print("edge:        rpc/lcd -> %s, %s  GOMAXPROCS=%s GOMEMLIMIT=%s" % (
+      e["EDGE_RPC_UPSTREAM"], e["EDGE_LCD_UPSTREAM"], e["GOMAXPROCS"], e["GOMEMLIMIT"]))
 print("DEV_INIT:   ", n["DEV_INIT"], " CHAIN_ID:", n["CHAIN_ID"], " MIN_GAS:", n.get("MIN_GAS_PRICES"),
       " mempool.max-txs:", n.get("EARTHD_MEMPOOL_MAX_TXS"))
 print("limits:       query_gas=%s rpc_conns=%s rpc_subs=%s api_conns=%s rpc_unsafe=%s" % (

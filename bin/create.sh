@@ -448,7 +448,7 @@ body = {
         "owner": dig(d, "owner"),
         "dseq": str(dseq),
         # gseq/oseq are 1 for a single-group deployment, which this is —
-        # build-sdl.py asserts the three services and one profile.
+        # build-sdl.py asserts the four services and one placement group.
         "gseq": 1, "oseq": 1,
         "provider": provider,
     }],
