@@ -1,16 +1,18 @@
 # Akash deployment: the earth chain node
 
-One deployment, three services:
+One deployment, four services:
 
     node          earthd, the validator and full-history RPC   -> /data
-    cloudflared   Cloudflare Tunnel connector (lcd.*, rpc.*)
+    edge          earth-edge, the request filter in front of its RPC and LCD
+    cloudflared   Cloudflare Tunnel connector (lcd.*, rpc.* -> edge)
     relayer       IBC relayer, off by default (ENABLED=false)
 
 The backend (gas grants and the privacy indexer) is a separate repo, image and lease
 (`earth-network-backend`), with its own tunnel. Closing a lease destroys its volumes,
 and this one holds the chain's state: a backend change must not be able to take it.
 The image's entrypoint (`docker/entrypoint.sh` in the chain repo) installs the baked
-genesis, checks its sha256, and starts `earthd` under cosmovisor.
+genesis, checks its sha256, and starts `earthd` under cosmovisor. The same image
+carries `earth-edge`, which the `edge` service runs instead.
 
 ## The image
 
@@ -77,175 +79,172 @@ Akash trial deployments auto-close after 24 hours, which is the same thing.
 
 `NO_LOGS.md` at the repo root is the policy. Here: `EARTHD_LOG_LEVEL=*:info,rpc-server:error`
 on the node and `--loglevel info` on cloudflared, both refused by `build-sdl.py` at
-debug or trace. The Cloudflare settings it needs are listed there.
+debug or trace. earth-edge has no request logging to turn on. The Cloudflare
+settings it needs are listed there.
 
-## Public RPC and LCD limits
+## Public RPC and LCD
 
 `rpc.erth.network` and `lcd.erth.network` are served by the validator process, the
-network's only signer. Two layers keep a query flood from slowing block production.
+network's only signer. Three layers keep a query flood from slowing block production,
+each doing the one thing it can do exactly:
+
+    client -> Cloudflare (per-IP rate limits, no websockets)
+           -> cloudflared -> edge (earth-edge: allowlist, per-class caps)
+           -> node (query-gas limit, connection caps)
+
+**The filter, `edge`.** earth-edge (chain repo `docker/edge`, built into the node's
+image and run as its own service, `akash/deploy.yaml`) is the only thing the public
+hostnames reach; the node's 26657 and 1317 are published to it alone. It replaced a
+Cloudflare allowlist that read the URI, which could not be made to agree with the
+node: CometBFT decodes an `abci_query` argument a second time (`0x` hex, JSON `\u`
+escapes; R4-E-1), the gateway routes on a path in which `%2F` is a slash (R4-E-2),
+and the GET-only rule broke state sync and every `earthd --node` command (R4-E-3).
+The filter:
+
+- **decodes each request once, exactly as the node would** (CometBFT v0.38's URI and
+  JSON-RPC argument decoding, grpc-gateway v1.16's path matching), checks the
+  decoded call against an allowlist, and **forwards a request it wrote itself** in
+  one canonical encoding. The node never parses anything a client wrote, so there
+  is no second reading to hide in. Its conformance tests run its decoder against
+  CometBFT's own handlers and its routes against every gateway binding in the SDK's
+  and the chain's protos;
+- **caps each cost class** (below): however many expensive calls arrive, at most a
+  few reach the signer at once; the rest get `503` at once;
+- bounds bodies (1 MiB), headers (16 KiB) and time, keeps **no per-client state**,
+  passes the node only `Origin`, `Accept`, the CORS preflight headers and (LCD)
+  `x-cosmos-block-height`, and **logs no request** (NO_LOGS.md);
+- answers a refusal with `403` and `refused by the edge filter: <reason>` in the
+  node's own error shape, so clients print why.
 
 **On the node** (`akash/deploy.yaml`, refused by `build-sdl.py` when missing):
 `EARTHD_QUERY_GAS_LIMIT=50000000` (one gRPC/LCD/abci_query gRPC-path query; the SDK
 default is unbounded), `EARTHD_RPC_MAX_OPEN_CONNECTIONS=100`,
 `EARTHD_RPC_MAX_SUBSCRIPTION_CLIENTS=0` (no subscriptions at all),
-`EARTHD_API_MAX_OPEN_CONNECTIONS=200`, `EARTHD_RPC_UNSAFE=false`. These are env, so
-changing one is an in-place PUT. What CometBFT 0.38 cannot do on the node: switch off
-`tx_search`/`block_search` (the kv tx index has to stay on, because every client's
-commit poll is a by-hash `/tx` lookup through the LCD), switch off `/websocket`, or
-meter an index scan or a `/store/<module>/subspace` read (neither runs under the
-query-gas meter). Those are closed at Cloudflare.
+`EARTHD_API_MAX_OPEN_CONNECTIONS=200`, `EARTHD_RPC_UNSAFE=false`. CometBFT 0.38 cannot
+switch off `tx_search` or `/websocket`, or meter an index scan or a raw store read
+(the kv tx index stays on: every client's commit poll is a by-hash lookup). Those are
+the filter's.
+
+**At Cloudflare**: per-IP rate limits and a websocket block, nothing that parses a
+request (below).
 
 ### What the clients call
 
-Checked against the code (round 3, R3-BD-1). Anything not listed here is refused.
+Checked against the code (round 4; mobile-orch, app-orch, backend-orch, chain-orch,
+docs-privacy). This is the filter's allowlist; anything else is refused.
 
 | Client | `rpc.erth.network` | `lcd.erth.network` |
 | --- | --- | --- |
-| iOS and Android wallets | GET `/blockchain` (explorer range); GET `/status`, `/genesis_chunked`, `/block` (own-node probe) | GET module queries and `/cosmos/tx/v1beta1/txs/{hash}` (commit polls); POST `/cosmos/tx/v1beta1/txs` and `/cosmos/tx/v1beta1/simulate` (JSON) |
-| Web app | GET `/blockchain`, `/block_results`, `/abci_query?path="/cosmos.bank.v1beta1.Query/SupplyOf"` | the same GETs, the explorer's search `GET /cosmos/tx/v1beta1/txs?query=…`, POST `/cosmos/tx/v1beta1/txs` (JSON); browser CORS preflights (`OPTIONS`) |
-| Keplr (chain suggested by the web app) | GET `/status`. Its own send screen also opens `/websocket` to wait for the tx; refused, so that one screen shows no "confirmed" notice (the send itself goes through the LCD and lands) | GETs, POST broadcast |
-| Backend | GET `/status`, `/blockchain`, `/block_results`, `/abci_query` (`/earth.*`, `/store/personhood/subspace`); **JSON-RPC POST `/`** from `earthd gas-check` (`status`, `block`, `abci_query` with `prove=true`) | cosmpy GETs, POST broadcast and simulate |
-| Relayer (when enabled) | `http://node:26657` inside the lease, never through Cloudflare | none |
+| iOS and Android wallets | GET `/blockchain` (explorer); GET `/status`, `/genesis_chunked`, `/block` (own-node probe) | module GETs (some with `x-cosmos-block-height`), `/cosmos/tx/v1beta1/txs/{hash}` (commit polls), the explorer's search (`message.sender='…'`, `transfer.recipient='…'`); POST `/cosmos/tx/v1beta1/txs` and `/simulate` (JSON) |
+| Web app | GET `/blockchain`, `/block_results`, `/abci_query` SupplyOf | module GETs, the explorer's search (`tx.height=N`, sender, recipient; **not** `tx.height>0`, below), POST broadcast (JSON), CORS preflights |
+| Keplr (chain suggested by the web app) | GET `/status`. Its send screen opens `/websocket` to wait for the tx: refused, so that screen shows no "confirmed" (the send lands) | GETs, POST broadcast |
+| Backend | GET `/status`, `/blockchain`, `/block_results`, `/abci_query` (`/earth.*` trees and handles at a height, `/store/personhood/subspace` `regs_by_dsc`); `earthd gas-check` JSON-RPC POST `/`: `status`, `block`, `abci_query` `/store/{pki,personhood,shielded}/key` (with `prove` when empty) and `/store/pki/subspace` CSCA index ranges | cosmpy: GETs, POST broadcast and simulate |
+| `earthd … --node https://rpc.erth.network:443` (docs, trust-store runbook) | JSON-RPC POST `/`: `status`, `block`, `tx` (`query tx`), `abci_query` on the gRPC paths the LCD serves plus `Query/Account`, `Query/ModuleAccountByName`, `Service/Simulate` (`--gas auto`), `Query/Registration`, `Query/RegistrationsByDsc`, `gov.v1 Query/Proposal`; `broadcast_tx_sync`/`_async` | none |
+| State sync (`rpc_servers`, docs join.md) | JSON-RPC POST `/`: `commit`, `validators` (`per_page` ≤ 100), `consensus_params` | none |
+| Relayer (when enabled) | `http://node:26657` inside the lease, never through Cloudflare or the filter | none |
 
-Nothing of ours calls `tx_search` or `block_search`, subscribes, or sends a form-encoded
-POST to the LCD. The backend is the one client that needs more than the public set (a
-POST, `prove`, raw store reads, and one address doing every user's work), so it carries
-a credential instead of being let through by address.
+Not served: `tx_search`, `block_search` (unmetered kv-index scans), `/websocket` and
+`subscribe`, JSON-RPC batches, `broadcast_tx_commit`, `check_tx`,
+`broadcast_evidence`, `genesis` (use `genesis_chunked`), `net_info`, the consensus
+and mempool dumps, the unsafe routes, `abci_query` with `prove` on a gRPC path or a
+subspace read, any other `/store/` read, `/app/`, `/p2p/`, `/custom/`, the LCD's own
+`abci_query`, `GetTxsEvent`/`GetBlockWithTxs` over abci_query, the LCD search's range
+and `events=` forms, form or grpc-web POSTs, `X-HTTP-Method-Override`, and any path
+with a `%`-escape, `:verb`, `//`, a trailing `/`, or a `.`/`..` segment.
+`earthd query txs` and `query wait-tx` (search, websocket) therefore fail against
+the public RPC; `query tx <hash>` works.
+
+**One client change is needed:** the web explorer's "latest transactions" list
+searches `tx.height>0`. A range makes CometBFT's kv indexer walk every `tx.height`
+entry and sort them, unmetered, so the filter refuses it. The list can be built from
+`/blockchain` (`num_txs` per block) and a `tx.height=N` search per block that has
+transactions.
+
+### Cost classes
+
+Concurrent calls the filter lets through to the node, per class (`filter/limit.go`),
+and how long a call waits for a slot before its `503`:
+
+| Class | What | At once | Waits |
+| --- | --- | --- | --- |
+| light | status, block, commit, validators, consensus_params, genesis_chunked, tx by hash, LCD blocks and by-hash tx | 24 | 2 s |
+| results | block_results, blockchain | 8 | 2 s |
+| query | gRPC Query paths (abci_query, LCD GETs) | 12 | 2 s |
+| store | raw `/store/` reads | 3 | 2 s |
+| broadcast | broadcast_tx_*, LCD POST txs (CheckTx verifies a private tx's proofs) | 4 | 5 s |
+| simulate | LCD simulate, abci_query Simulate (runs the tx, proofs included) | 2 | 5 s |
+| search | LCD tx search (equality queries only) | 1 | 2 s |
+
+Together that is at most 54 calls at the node, under its 100 RPC and 200 API
+connection caps. A changed allowlist or cap is a chain-repo change (`docker/edge`,
+with a case in its tests) and a new image; it goes onto the lease with an in-place
+PUT like any image change.
 
 ### The backend's credential
 
-The backend sends `Authorization: Basic base64("earth-backend:" + CHAIN_EDGE_TOKEN)` to
-both hostnames, and only to them (backend repo `services/edge.py`; its
-`deploy/akash/README.md`, "The edge token"). Rule 0 matches that exact header. This
-replaces the old egress-IP list: an Akash provider's egress address is shared with its
-other tenants and changes with the lease; the token is neither. Compute the header
-value from the backend's `.env` on the operator's machine:
+Every call the backend makes is in the public allowlist above, so the filter neither
+needs nor reads a credential (it strips `Authorization`). What the backend still
+needs is to be exempt from the **per-IP rate limits**: one address does every user's
+gas grants and a full re-index from height 1. So it sends
+`Authorization: Basic base64("earth-backend:" + CHAIN_EDGE_TOKEN)` (backend repo
+`services/edge.py`, over HTTPS only), and rule 0 skips the rate limiting rules for
+that exact header, and nothing else: no custom rule is skipped, so the websocket
+block applies, and the filter applies to everyone. A leaked token buys an address
+the backend's rate (the per-class caps still bound what reaches the signer), not
+the R3-BD-1 harm it bought under the old allowlist (R4-E-6).
+
+Compute the header value from the backend's `.env` on the operator's machine:
 
     printf 'earth-backend:%s' "$CHAIN_EDGE_TOKEN" | base64 | tr -d '\n'
 
 The value sits in the rule's expression, visible to anyone with dashboard access to the
-zone, which is the same set of people who could edit the rules anyway. Rotating it is
-editing rule 0 and the backend's `.env` together, then an in-place backend deploy.
+zone. Rotating it is editing rule 0 and the backend's `.env` together, then an in-place
+backend deploy.
 
-### Rules
+### Cloudflare rules
 
-Zone `erth.network`, **Security → WAF**. Paste each expression into "Edit expression".
-Custom rules run before rate limiting rules, so rule 0's Skip covers both. Order the
-custom rules 0, 1, 2. URL normalization (**Rules → Settings → Normalize incoming
-URLs**, on by default) must stay on: the path checks below compare normalized paths.
+Zone `erth.network`, **Security → WAF**. Order the custom rules 0, 1. Custom rules
+run before rate limiting rules.
 
-**Rule 0. Custom rule, action Skip** (the backend):
+**Rule 0. Custom rule, action Skip** (the backend, rate limits only):
 
     (http.host in {"rpc.erth.network" "lcd.erth.network"}
      and http.request.headers["authorization"][0] eq "Basic <value computed above>")
 
-Skip: **All remaining custom rules**, **All rate limiting rules**, and under "More
-components to skip" Browser Integrity Check and Security Level. Untick **Log matching
-requests**: the backend's every request would otherwise be a Security Event.
+Skip: **All rate limiting rules** only. Not "All remaining custom rules", not BIC or
+Security Level (those are off for these hostnames anyway, NO_LOGS.md). Untick
+**Log matching requests**.
 
-**Rule 1. Custom rule, action Block** (RPC allowlist):
+**Rule 1. Custom rule, action Block** (websockets):
 
-    (http.host eq "rpc.erth.network" and (
-       http.request.method ne "GET"
-       or not http.request.uri.path in {"/status" "/block" "/blockchain" "/block_results" "/abci_query" "/genesis_chunked"}
-       or (http.request.uri.path eq "/abci_query" and (
-            not lower(url_decode(http.request.uri.query)) contains "/cosmos.bank.v1beta1.query/supplyof"
-            or lower(url_decode(http.request.uri.query)) contains "prove"
-            or lower(url_decode(http.request.uri.query)) contains "service"
-            or lower(url_decode(http.request.uri.query)) contains "/store"
-            or lower(url_decode(http.request.uri.query)) contains "/app"
-            or lower(url_decode(http.request.uri.query)) contains "/p2p"
-            or lower(url_decode(http.request.uri.query)) contains "/custom"))))
+    (http.host in {"rpc.erth.network" "lcd.erth.network"} and (
+       http.request.uri.path eq "/websocket"
+       or any(lower(http.request.headers.names[*])[*] eq "upgrade")))
 
-- **Method.** CometBFT serves JSON-RPC from a POST body to `/` (and from a GET with a
-  body), and serves every URI route to any method. Only GET passes, and `/` is not on
-  the list, so no JSON-RPC body reaches the node from the public.
-- **Paths.** An allowlist, so `/websocket` (which carries every RPC method, `tx_search`
-  included, over one upgrade that counts as one request), `/tx_search`,
-  `/block_search`, `/unconfirmed_txs`, `/net_info`, `/dump_consensus_state`,
-  `/broadcast_tx_*`, the unsafe routes and anything added by a future CometBFT are all
-  refused without being named.
-- **`/abci_query`.** The query string reaches Cloudflare raw and the node decodes it,
-  so a check on the raw string is evaded by `prove=%74rue`. The checks run on
-  `lower(url_decode(…))`, one decoding, as Go's `url.Query()` does once, and lowercased,
-  which only widens them (the node's names and paths are case-sensitive). They are a
-  blocklist over the whole decoded string, not a parse, because CometBFT reads the
-  first of repeated parameters: `prove` in any position, any `…Service/` gRPC path
-  (`cosmos.tx.v1beta1.Service/GetTxsEvent` runs the tx search; the CometBFT service
-  and reflection are services too), raw `/store/` reads (a `subspace` read with an
-  empty prefix returns a whole module store, unmetered), `/app/` (simulate), `/p2p/`
-  and `/custom/`. What passes is a gRPC `…Query/…` path, metered by the query-gas
-  limit and no more than the LCD already serves; the SupplyOf requirement keeps
-  casual use to the web app's one call. `data` is hex and `height` digits, so neither
-  can hold the blocked words for a real caller.
-- If the dashboard refuses `url_decode` on your plan, take `"/abci_query"` out of the
-  path list and delete the `/abci_query` clause: the public then has no abci_query at
-  all (the web app's `supplyAtHeight` returns null and the explorer leaves its issuance
-  figure blank; the backend is unaffected through rule 0). A raw-string check is not
-  an alternative: the web app's own call is percent-encoded (`%22`), so no raw
-  `contains` can tell it from an encoded attack. On Business or above, `matches`
-  (regex) allows an exact positive match on the decoded string instead.
+The filter refuses an upgrade too; this keeps the socket from being opened past
+Cloudflare at all, where a rate limit would count it once. (**Network → WebSockets**
+off for the zone does the same, if nothing else on `erth.network` uses one; the
+backend and the web app do not.)
 
-**Rule 2. Custom rule, action Block** (LCD side doors):
-
-    (http.host eq "lcd.erth.network" and (
-       not http.request.method in {"GET" "POST" "OPTIONS"}
-       or (http.request.method eq "POST"
-           and not http.request.uri.path in {"/cosmos/tx/v1beta1/txs" "/cosmos/tx/v1beta1/simulate"})
-       or any(http.request.headers["content-type"][*] contains "form-urlencoded")
-       or any(lower(http.request.headers.names[*])[*] eq "x-http-method-override")
-       or starts_with(http.request.uri.path, "/cosmos/base/tendermint/v1beta1/abci_query")))
-
-- **The method-override door.** The SDK's gRPC gateway (grpc-gateway v1.16.0,
-  `runtime/mux.go`, path-length fallback on by default) turns a POST with
-  `Content-Type: application/x-www-form-urlencoded` and `X-HTTP-Method-Override: GET`
-  into a GET, with its parameters in the body: `POST /cosmos/tx/v1beta1/txs` becomes
-  the tx search, invisible to any check on the method or the query string, and a
-  form POST to any GET-only path runs that GET. No client sends form bodies or the
-  override header (every POST is `application/json`), so both are refused, and POST
-  is limited to broadcast and simulate. `OPTIONS` stays for the web app's CORS
-  preflights.
-- **`/cosmos/base/tendermint/v1beta1/abci_query`.** The LCD's abci_query refuses gRPC
-  paths (cmtservice `ABCIQuery`) but serves `/store/…` reads, `subspace` and `prove`
-  included. No client uses it.
-- The LCD has no websocket, and its tx search is GET-only once the door above is shut,
-  which is what makes rule 3's `path eq` complete.
-
-**Rule 3. Rate limiting rule, tx search only**, characteristic IP:
+**Rule 2. Rate limiting rule, tx search**, characteristic IP:
 
     (http.host eq "lcd.erth.network" and http.request.method eq "GET"
      and http.request.uri.path eq "/cosmos/tx/v1beta1/txs")
 
-120 requests per 1 minute, then block for 1 minute.
+120 requests per 1 minute, then block for 1 minute. The filter gives the search one
+slot for everyone, so without a per-IP limit one address could keep it busy and
+everyone else would get `503`. The path is the decoded one only after the filter has
+refused `%`-escapes, so `/cosmos/tx%2Fv1beta1/txs` cannot dodge this rule into
+rule 3 and still be served.
 
-- GET on that exact path is only ever the search: `/cosmos/tx/v1beta1/txs/{hash}` is
-  another path (a trailing slash routes to the by-hash lookup with an empty hash, and
-  `txs:verb` is a 404), and the broadcast is a POST. So nothing about the parameters
-  needs matching, and nothing can dodge the rule by spelling them differently
-  (`?%71uery=` is still a GET on this path). The earlier `args.names` clause added only
-  that evasion and is gone (R3-BD-2).
-- Sizing: an explorer page view makes 1 to 3 searches. Behind carrier NAT one IPv4
-  address fronts many phones, so a per-IP limit is a limit on a whole carrier block.
-  120 per minute is about 40 to 120 explorer views a minute from one address, far
-  above what one person does, and a 1-minute block (not 10) means a carrier-NAT
-  neighbour who trips it loses search for a minute, not ten. What it stops is one
-  address scanning in a loop.
-
-**Rule 4. Rate limiting rule, everything else**, characteristic IP:
+**Rule 3. Rate limiting rule, everything else**, characteristic IP:
 
     (http.host in {"lcd.erth.network" "rpc.erth.network"})
 
-1,200 requests per 1 minute, then block for 1 minute.
-
-- It covers commit polls and broadcasts, which are cheap: a commit poll is a point
-  read, and a phone that sends a tx polls at most 20 times. 1,200 a minute is 60
-  phones each sending a tx and polling to the limit in the same minute from one
-  carrier address, with room left for their syncs.
-- The backend skips it (rule 0): a gas grant is a broadcast plus up to a dozen polls,
-  and a re-index from height 1 reads every block. Without the skip a launch-day burst
-  would block the backend and every grant after it would come back `202 pending`.
-- It is a flood stop, not capacity planning; the node-side limits are what bound the
-  load on the signer.
+1,200 requests per 1 minute, then block for 1 minute. A flood stop for one address,
+not capacity planning: behind carrier NAT one IPv4 address fronts many phones (a
+commit poll is a point read; a phone that sends a tx polls at most 20 times), and the
+filter's caps are what bound the signer's load. The backend skips it (rule 0).
 
 No caching rule: heights move, and a cached `/status` would stall the indexer.
 
@@ -256,77 +255,95 @@ field the plan lacks, loudly):
 
 | | Free | Pro | Business |
 | --- | --- | --- | --- |
-| Custom rules | 5 | 20 | 100 |
-| Custom rule fields used here (host, method, path, query, headers) and functions (`lower`, `url_decode`, `any`, `starts_with`), Skip action | yes | yes | yes |
-| `matches` (regex) | no | no | yes |
+| Custom rules (host, path, headers, `any`, `lower`, Skip) | 5 | 20 | 100 |
 | Rate limiting rules | 1 | 2 | 5 |
 | Rate limiting expression fields | path | host, path, URI, query | adds method, source IP, user agent |
 | Periods / block durations | 10 s / 10 s | up to 1 min / up to 1 h | up to 10 min / up to 1 day |
 
-So rules 0 to 2, which carry the protection, are the same on every plan. Rules 3 and 4:
+Rules 0 and 1 are the same on every plan. Rules 2 and 3:
 
 - **Business**: as written.
-- **Pro**: rule 4 as written. Rule 3 cannot name the method, so use the query string
-  instead (a search always has one; a broadcast has none):
+- **Pro**: rule 3 as written; rule 2 without the method (a search always has a query
+  string, a broadcast none):
 
       (http.host eq "lcd.erth.network" and http.request.uri.path eq "/cosmos/tx/v1beta1/txs"
        and http.request.uri.query ne "")
 
-- **Free**: one rule, path fields only, so no host. Keep rule 4 only, scoped by the
-  node's paths so it never touches `api.erth.network` or the web app (neither serves
-  any of these), at 200 requests per 10 seconds with a 10-second block:
+- **Free**: one rule, path fields only, so no host. Keep rule 3, scoped by the node's
+  paths so it never touches `api.erth.network` or the web app, at 200 requests per
+  10 seconds with a 10-second block:
 
       (starts_with(http.request.uri.path, "/cosmos/") or starts_with(http.request.uri.path, "/earth/")
-       or starts_with(http.request.uri.path, "/ibc/") or starts_with(http.request.uri.path, "/cosmwasm/")
-       or http.request.uri.path in {"/status" "/block" "/blockchain" "/block_results" "/abci_query" "/genesis_chunked"})
+       or http.request.uri.path in {"/" "/status" "/block" "/blockchain" "/block_results" "/abci_query"
+                                    "/genesis_chunked" "/commit" "/validators" "/consensus_params" "/tx"})
 
-  Search then has only that limit and the node's own bounds. At about 1.25 polls a
-  second per phone, 200 per 10 s allows about 16 phones polling at once behind one
-  address; a trip costs 10 s, which the wallets' 20 × 800 ms poll loop partly absorbs.
+  The search then has only that limit and its one slot.
+
+Nothing here depends on URL normalization any more (the filter refuses what
+normalization would rewrite); leaving it on is harmless.
 
 ### Check from outside
 
-From an address that does not hold the token (expect `403` unless noted):
+From an address that does not hold the token. Expect `403` with `refused by the edge
+filter` unless noted. A `200` on any of the refused lines, or a `tx_search` that
+answers, means the hostname reaches the node directly instead of `edge`: fix the
+Public Hostname before anything else.
 
     R=https://rpc.erth.network L=https://lcd.erth.network
     c() { curl -s -o /dev/null -w '%{http_code}\n' "$@"; }
-    c "$R/status"                                                    # 200
+    j() { curl -s -H 'content-type: application/json' -d "$1" "$R/"; echo; }
+    # served
+    c "$R/status"                                                                     # 200
+    c "$R/abci_query?path=%22/cosmos.bank.v1beta1.Query/SupplyOf%22&data=0x0a057565727468&height=1"   # 200
+    j '{"jsonrpc":"2.0","id":1,"method":"status"}' | head -c 60                        # a result
+    j '{"jsonrpc":"2.0","id":1,"method":"commit","params":{}}' | head -c 60           # a result (state sync)
+    earthd status --node $R:443 | head -c 60                                          # a result
+    earthd query auth module-account gov --node $R:443                               # the gov account
+    # refused: scans, sockets, batches
     c "$R/tx_search?query=%22tx.height%3E0%22"
-    c -X POST -H 'content-type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"tx_search","params":{"query":"tx.height>0"}}' "$R/"
+    j '{"jsonrpc":"2.0","id":1,"method":"tx_search","params":{"query":"tx.height>0"}}'
+    j '[{"jsonrpc":"2.0","id":1,"method":"status"}]'
     c -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
-      -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" "$R/websocket"
+      -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" "$R/websocket"           # 403 (rule 1)
+    # refused: abci_query encodings (R3-BD-1, R4-E-1)
     c "$R/abci_query?path=%22/cosmos.bank.v1beta1.Query/SupplyOf%22&data=0x0a057565727468&prove=%74rue"
-    c "$R/abci_query?path=%22/cosmos%2Etx%2Ev1beta1%2EService/GetTxsEvent%22"
-    c "$R/abci_query?path=%22/store/bank/subspace%22"
-    c "$R/abci_query?path=%22/cosmos.bank.v1beta1.Query/SupplyOf%22&data=0x0a057565727468"   # 200
+    c "$R/abci_query?path=0x2f636f736d6f732e74782e763162657461312e536572766963652f4765745478734576656e74&x=/cosmos.bank.v1beta1.Query/SupplyOf"
+    c "$R/abci_query?path=%22/cosmos.tx.v1beta1.Ser%5Cu0076ice/GetTxsEvent%22&x=/cosmos.bank.v1beta1.Query/SupplyOf"
+    c "$R/abci_query?path=%22/%5Cu0073tore/bank/subspace%22"
+    c "$R/abci_query?path=0x2f73746f72652f62616e6b2f7375627370616365"
+    # refused: LCD side doors (R3-BD-1, R4-E-2)
+    c "$L/cosmos/base/tendermint/v1beta1%2Fabci_query?path=/store/bank/subspace&data="
+    c "$L/cosmos/base/tendermint/v1beta1/abci_query?path=/store/bank/subspace"
+    c "$L/cosmos/tx%2Fv1beta1/txs?query=tx.height%3E0"
+    c "$L/cosmos/tx/v1beta1/txs?query=tx.height%3E0"
     c -X POST -H 'content-type: application/x-www-form-urlencoded' -H 'X-HTTP-Method-Override: GET' \
       --data 'query=tx.height%3E0' "$L/cosmos/tx/v1beta1/txs"
-    c "$L/cosmos/base/tendermint/v1beta1/abci_query?path=/store/bank/subspace"
+    c "$L/cosmos/tx/v1beta1/txs?query=tx.height%3D1"                                  # 200 (equality)
 
 Then the rate limits:
 
 - `for i in $(seq 1 150); do curl -s -o /dev/null -w '%{http_code}\n' $L/cosmos/tx/v1beta1/txs/<a real tx hash>; done | sort | uniq -c`
-  shows only 200: by-hash lookups are not limited by rule 3.
-- The same loop on `'/cosmos/tx/v1beta1/txs?query=tx.height%3D1&pagination.limit=1'`
-  turns to 429 after 120. Wait a minute before testing anything else from that
-  address.
+  shows only 200: by-hash lookups are not limited by rule 2.
+- The same loop on `'/cosmos/tx/v1beta1/txs?query=tx.height%3D1&limit=1'` turns to
+  429 after 120 (and may show a few 503 if another search held the slot). Wait a
+  minute before testing anything else from that address.
 
-And with the token, from the operator's machine (the backend's `.env` sourced):
-
-    curl -s -u "earth-backend:$CHAIN_EDGE_TOKEN" -H 'content-type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"status"}' https://rpc.erth.network/ | head -c 80   # a result
-
-and a real registration's `/gas/register` succeeding (gas-check is the JSON-RPC POST).
-In **Security → Events**, none of the token's requests appear (rule 0 logs nothing).
+And with the token, from the operator's machine (the backend's `.env` sourced): 1,300
+`/status` GETs with `-u "earth-backend:$CHAIN_EDGE_TOKEN"` all answer 200, and a real
+registration's `/gas/register` succeeds. In **Security → Events**, none of the token's
+requests appear.
 
 ## Addresses
 
-The node is reachable for clients **only through the tunnel**: `lcd.erth.network` and
-`rpc.erth.network`. Neither 1317 nor 26657 is on a provider port, so a new lease
-changes no client address. Configure the Public Hostnames on Cloudflare's side:
+The node is reachable for clients **only through the tunnel and the filter**:
+`lcd.erth.network` and `rpc.erth.network`. Neither 1317 nor 26657 is on a provider
+port, so a new lease changes no client address. Configure the Public Hostnames on
+Cloudflare's side, at the filter, never the node:
 
-    lcd.* -> http://node:1317      rpc.* -> http://node:26657
+    lcd.* -> http://edge:1317      rpc.* -> http://edge:26657
+
+`node:*` would also answer (the lease's services can reach each other by name), and
+would serve the public with no filter at all. "Check from outside" catches it.
 
 P2P (26656) is the one application port on a provider port, because CometBFT's
 protocol is not HTTP. The provider assigns it, so after a new lease set
