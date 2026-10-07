@@ -48,6 +48,23 @@ COUNTERPARTY_GAS_PRICES="${COUNTERPARTY_GAS_PRICES:-0.025uatom}"
 COUNTERPARTY_COIN_TYPE="${COUNTERPARTY_COIN_TYPE:-118}"
 COUNTERPARTY_EXTRA_CODECS="${COUNTERPARTY_EXTRA_CODECS:-}"
 PATH_NAME="${PATH_NAME:-earth-hub}"
+# Messages per relay tx (rly --max-msgs; rly's own default is 5). Read on every
+# start, unlike the config above.
+#
+# Earth meters what a tx leaves in its ABCI result (chain app/result_cap.go):
+# past a free 8 KiB per tx, 20 gas per byte, and any ONE msg over 1 MiB fails
+# its tx. A MsgRecvPacket is ~3.7 KB, but ~168 KB when the sender used ibc-go's
+# 32 KiB memo maximum, and anyone on the counterparty can send those. So the
+# gas a batch needs depends on the memos in it: 10 ordinary packets ~0.6M
+# gas, 10 max-memo packets ~34M, which gas-adjustment 1.5 makes ~51M wanted,
+# about half of earth's 100M block. Simulation prices all of it, so a batch
+# never fails for its size; a smaller batch only lowers the worst case.
+# Do not set rly's max-gas-amount for earth: rly then sends EVERY tx with that
+# gas limit and pays fees for all of it.
+RELAYER_MAX_MSGS="${RELAYER_MAX_MSGS:-10}"
+case "$RELAYER_MAX_MSGS" in
+  ''|*[!0-9]*|0) echo "[relayer] RELAYER_MAX_MSGS must be a positive integer, got '$RELAYER_MAX_MSGS'" >&2; exit 1 ;;
+esac
 RLY_HOME="${RLY_HOME:-/data/relayer}"
 
 mkdir -p "$RLY_HOME"
@@ -160,5 +177,5 @@ if [ "${LINK_ON_START:-false}" = "true" ]; then
   fi
 fi
 
-say "relaying $PATH_NAME"
-exec rly start "$PATH_NAME" --home "$RLY_HOME"
+say "relaying $PATH_NAME, at most $RELAYER_MAX_MSGS msgs per tx"
+exec rly start "$PATH_NAME" --max-msgs "$RELAYER_MAX_MSGS" --home "$RLY_HOME"

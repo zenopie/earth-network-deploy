@@ -515,6 +515,24 @@ restart must not retry it. The config is written once into `/data/relayer`, so l
 env changes do nothing until that directory is cleared. A new genesis has no IBC
 clients, so the old path's ids in the SDL are commented out.
 
+**Batch size and gas on earth.** Earth charges for the bytes a tx leaves in
+its result (chain `app/result_cap.go`): the first 8 KiB per tx are free, then
+20 gas per byte, and one msg over 1 MiB fails its tx (the cap is per msg, so a
+few large packets never fail a batch). An ordinary `MsgRecvPacket` is ~3.7 KB;
+one whose sender used ibc-go's 32 KiB memo maximum is ~168 KB and ~3.4M gas,
+and anyone on the counterparty can send those for the price of one transfer
+there. `RELAYER_MAX_MSGS` (default 10, rly's `--max-msgs`) bounds a batch: ten
+max-memo packets are ~34M gas, ~51M with the 1.5 gas adjustment, inside the
+100M block. Keep the gas adjustment at 1.3 or more (simulation prices the
+bytes), do not set rly's `max-gas-amount` (rly then pays for that limit on
+every tx), and keep the earth balance funded for bursts: a run of max-memo
+packets costs about 0.02 ERTH each at 0.006uerth. Hermes users: set
+`max_msg_num = 10` for earth (Hermes' default 30 lets thirty max-memo packets
+ask for ~100M gas, a whole block) and `max_gas` to at least 60M.
+A packet naming an IBC callback contract on earth cannot push its receive over
+the cap: the chain fails a callback that emits more than 256 KiB (an error
+acknowledgement, the packet still received).
+
 **Fund it on both chains**: uerth to deliver packets here (the node's minimum gas
 price applies), the counterparty's token there. A relayer that runs dry on either side
 stops silently.

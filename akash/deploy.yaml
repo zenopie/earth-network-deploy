@@ -508,6 +508,9 @@ services:
       # Injective's minimum is 160000000inj per gas unit, and INJ has 18
       # decimals. Set with headroom, as with any chain whose floor can move.
       - COUNTERPARTY_GAS_PRICES=500000000inj
+      # Msgs per relay tx, read on every start (node/relayer.sh explains the
+      # size: earth prices result bytes, and a max-memo packet is ~168 KB).
+      - RELAYER_MAX_MSGS=10
       # Set true for ONE deploy to build a new path, then straight back to
       # false with the ids below filled in from
       #   /ibc/core/connection/v1/connections/<id>
