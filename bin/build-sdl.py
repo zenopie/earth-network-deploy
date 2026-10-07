@@ -444,8 +444,13 @@ ed = svcs["edge"]
 em = re.fullmatch(re.escape(EDGE_IMAGE_REPO) + r"@(sha256:[0-9a-f]{64})", ed["image"])
 assert em, "edge image must be %s@sha256:<64 hex> (pinned by digest, not a tag), has %r" % (
     EDGE_IMAGE_REPO, ed["image"])
-assert em.group(1) != EDGE_PLACEHOLDER, (
-    "edge image is the placeholder digest: run bin/build-edge.sh --pin and commit (RELAUNCH.md 1.4)")
+# The placeholder is refused in any build that pins the node (what deploy.sh
+# and create.sh send); a build without a digest is a dry read of the keys
+# (RELAUNCH.md 2.1), whose node image is a placeholder too.
+if em.group(1) == EDGE_PLACEHOLDER:
+    assert not digest, (
+        "edge image is the placeholder digest: run bin/build-edge.sh --pin and commit (RELAUNCH.md 1.4)")
+    print("WARNING: edge image is the placeholder; a build with a node digest refuses it (RELAUNCH.md 1.4)")
 # No command or args: what runs is the image's ENTRYPOINT as its USER, both
 # fixed by the digest. An override could run something else, or as root.
 assert not ed.get("command") and not ed.get("args"), (
