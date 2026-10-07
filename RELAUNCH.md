@@ -74,7 +74,8 @@ height 2.
    It prints the `node id` (from `NODE_KEY_B64`) and the consensus address and pubkey
    (from `PRIV_VALIDATOR_KEY_B64`). It refuses a key whose pubkey is not `PGqvPN4C…`
    (`EXPECTED_CONSENSUS_PUBKEY`), the old chain's `kTMzo…`, or an address that does not
-   derive from the pubkey.
+   derive from the pubkey. With `--tunnel` it also needs `CHAIN_EDGE_TOKEN` in `.env`
+   (the backend's, section 3.4): the edge's backend reserve is derived from it.
 2. **Run the ceremony** in the chain repo, on the operator's machine:
 
        scripts/ceremony.sh --genesis-time <RFC3339, UTC> \
@@ -219,20 +220,27 @@ chain tunnel (one token, one live connector).
    - the 26656 host:port from the lease status. Record it for `EXTERNAL_ADDRESS` and
      the docs' P2P address;
    - `bin/lease-logs.py --service edge`: `earth-edge: rpc :26657 -> http://node:26657,
-     lcd :1317 -> http://node:1317, … LCD routes, … gRPC paths over abci_query`, and
-     no `refusing to run as root`. The filter is up before the node: until
+     lcd :1317 -> http://node:1317, … LCD routes, … gRPC paths over abci_query,
+     backend reserve true`, and no `refusing to run as root`. `backend reserve false`
+     means the SDL went out without `EDGE_BACKEND_AUTH_SHA256` (`build-sdl.py` takes it
+     from `CHAIN_EDGE_TOKEN` in this repo's `.env` and refuses `--tunnel` without it). The filter is up before the node: until
      `genesis_time` it answers `502`.
 4. **Public Hostnames and Cloudflare rules for `rpc.*` and `lcd.*`** (akash/README.md,
    "Public RPC and LCD"), in place before `genesis_time`. The hostnames point at the
    filter: `rpc.* -> http://edge:26657`, `lcd.* -> http://edge:1317`, never `node:*`
    (that serves the public unfiltered). Then rule 0 (Skip **rate limiting rules
    only** for the backend's `CHAIN_EDGE_TOKEN` header; generate the token now and
-   put it in the backend's `.env`, section 4.3 needs it), rule 1 (block websocket
-   upgrades), and the two per-IP rate limits in the variant your plan accepts. The
-   allowlist itself is `edge`, in the SDL: nothing to configure. Run that section's
-   outside checks after the node is up; a `tx_search` that answers means a hostname
-   points at the node. The node-side limits are in the SDL too (`limits:` and
-   `edge:` lines of the dry run, `rpc_subs=0`).
+   put it in the backend's `.env`, section 4.3 needs it, **and in this repo's
+   `.env`**, from which `build-sdl.py` derives the edge's backend reserve), rule 1
+   (block websocket upgrades), the two per-IP rate limits in the variant your plan
+   accepts, and the `genesis_chunked` cache rule. **Purge `rpc.erth.network/genesis_chunked`
+   from Cloudflare's cache** (Caching → Purge Cache → Custom Purge, by URL prefix): a
+   relaunch under the same hostname has a new genesis. The allowlist itself is `edge`,
+   in the SDL: nothing to configure. After the node is up, run
+   `bin/check-edge.py` (exit 0, every line `ok`) and that section's manual checks; a
+   missing `X-Earth-Edge` or a `tx_search` that answers means a hostname points at the
+   node. Keep `bin/check-edge.py` on a schedule from then on. The node-side limits are
+   in the SDL too (`limits:`, `index:` and `edge:` lines of the dry run, `rpc_subs=0`).
 5. **Cloudflare no-logs settings** (NO_LOGS.md, "Cloudflare settings"): no Logpush
    job, Web Analytics and Network Error Logging off, no Zaraz or Workers, Browser
    Integrity Check and Security Level off for the API hostnames, WAF rules on Block,
@@ -288,7 +296,8 @@ grant history.
 5. **The backend skips the per-IP rate limits by its token, not its address.**
    Nothing to do per lease: rule 0 matches the `CHAIN_EDGE_TOKEN` header wherever the
    backend runs, and skips only the rate limits; every call the backend makes is in
-   the filter's public allowlist anyway. If the startup log says
+   the filter's public allowlist anyway; the edge gives the same header a few reserved
+   slots (`EDGE_BACKEND_AUTH_SHA256`, section 3.4). If the startup log says
    `CHAIN_EDGE_TOKEN is unset`, the backend works but its re-index and grant bursts
    meet `429`s; if grants fail with gas-check unavailable and a `403 … refused by the
    edge filter`, gas-check made a call the filter does not serve (a chain change to
