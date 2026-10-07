@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 REPO = os.environ.get("NODE_IMAGE_REPO", "zenopie/earth-network-node")
@@ -86,4 +87,8 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    try:
+        main(sys.argv)
+    except (urllib.error.URLError, ValueError, KeyError) as e:
+        fail("cannot read %s from the registry anonymously (%s): is the image pushed and its "
+             "package public?" % (sys.argv[1] if len(sys.argv) > 1 else "the image", e))
