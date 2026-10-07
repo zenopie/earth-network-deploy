@@ -213,7 +213,7 @@ if lock is not None:
 def state(dseq):
     """'active', 'closed' or 'absent' per the Console API; dies if unreadable."""
     req = urllib.request.Request(f"https://console-api.akash.network/v1/deployments/{dseq}",
-                                 headers={"x-api-key": key})
+                                 headers={"x-api-key": key, "User-Agent": "earth-deploy/1 (+bin)"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             d = json.load(r)
