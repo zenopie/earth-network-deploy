@@ -65,7 +65,7 @@ services:
     # built on that release. A tag is mutable and a digest is not, and on a
     # chain the difference between "the image I tested" and "an image with
     # that name" is a consensus failure.
-    image: ghcr.io/zenopie/earth-network-node@sha256:0000000000000000000000000000000000000000000000000000000000000000  # FROM ghcr.io/zenopie/earth-network-chain@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: ghcr.io/zenopie/earth-network-node@sha256:d382abb48b6d1b81555d8e56d5b7756815d82a8755cfd4bfca71cfcfbb567425  # FROM ghcr.io/zenopie/earth-network-chain@sha256:1db840f01e06e029e40d95722668d2fbe75173bb42443547663adcbb31c960d6
 
     env:
       # The relaunch genesis's chain id (chain repo networks/genesis/chain.json).
@@ -411,7 +411,7 @@ services:
     # PLACEHOLDER (all zeros): bin/build-edge.sh --pin builds, pushes and
     # writes the real digest here (RELAUNCH.md 1.4); build-sdl.py refuses the
     # placeholder. Never a tag, and not touched by the node's digest pin.
-    image: ghcr.io/zenopie/earth-network-edge@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: ghcr.io/zenopie/earth-network-edge@sha256:38ba4c1ff8c982905af2988f400755f3bc468a7530e7c2608ae0b4289d22c607
     # No command: the image's ENTRYPOINT (/earth-edge) runs as its USER,
     # uid 65532. Not root: it parses what strangers send, and earth-edge
     # refuses to start as root. build-sdl.py refuses a command or args here.
@@ -474,7 +474,7 @@ services:
   # else. The failure mode is delay, not theft.
   relayer:
     # The node's image, pinned with it by bin/build-node.sh --pin.
-    image: ghcr.io/zenopie/earth-network-node@sha256:0000000000000000000000000000000000000000000000000000000000000000  # FROM ghcr.io/zenopie/earth-network-chain@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: ghcr.io/zenopie/earth-network-node@sha256:d382abb48b6d1b81555d8e56d5b7756815d82a8755cfd4bfca71cfcfbb567425  # FROM ghcr.io/zenopie/earth-network-chain@sha256:1db840f01e06e029e40d95722668d2fbe75173bb42443547663adcbb31c960d6
     command:
       - /usr/local/bin/relayer.sh
     env:
